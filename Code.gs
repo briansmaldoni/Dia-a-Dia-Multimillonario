@@ -542,96 +542,119 @@ function guardarMovimiento_(data) {
 
   if (data.tipo !== 'single' && data.tipo !== 'divisible') throw new Error('Tipo inválido: ' + data.tipo);
 
-  const cfg = leerConfig_();
-  let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-  let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+  let obj = null;
+  let notifParaPush = null;
+  let cfgSnapshot = null;
 
-  const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    cfgSnapshot = cfg;
+    let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
+    let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
-  const id = data.id || Utilities.getUuid();
-  const filasMov = leerFilas_('Movimientos');
-  const movExistente = data.id ? filasMov.find(m => String(m.id).trim() === String(data.id).trim()) : null;
+    const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
+    const id = data.id || Utilities.getUuid();
+    const filasMov = leerFilas_('Movimientos');
+    const movExistente = data.id ? filasMov.find(m => String(m.id).trim() === String(data.id).trim()) : null;
 
-  if (movExistente) {
-    hbTotal += (movExistente.monto || 0);
-    if (movExistente.fromBag) {
-      bolsaTotal += (movExistente.monto || 0);
+    if (movExistente) {
+      hbTotal += (movExistente.monto || 0);
+      if (movExistente.fromBag) {
+        bolsaTotal += (movExistente.monto || 0);
+      }
     }
-  }
 
-  const nuevoMonto = monto;
-  const nuevoFromBag = !!data.fromBag;
+    const nuevoMonto = monto;
+    const nuevoFromBag = !!data.fromBag;
 
-  hbTotal -= nuevoMonto;
-  if (nuevoFromBag) {
-    bolsaTotal -= nuevoMonto;
-  }
+    hbTotal -= nuevoMonto;
+    if (nuevoFromBag) {
+      bolsaTotal -= nuevoMonto;
+    }
 
-  setConfigValores_({
-    homeBankingTotal: hbTotal,
-    bolsaTotal: bolsaTotal
-  });
-
-  const obj = {
-    id: id,
-    tipo: data.tipo,
-    fechasAfectadas: fechas,
-    monto: nuevoMonto,
-    montoPorFecha: nuevoMonto / fechas.length,
-    descripcion: (data.descripcion || '').trim(),
-    usuario: usuario,
-    fromBag: nuevoFromBag,
-    creadoEn: data.creadoEn || (movExistente ? movExistente.creadoEn : new Date().toISOString())
-  };
-
-  const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
-  if (!actualizado) agregarFila_('Movimientos', obj);
-
-  if (!movExistente && !actualizado) {
-    const paraUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
-    const descLimpia = obj.descripcion || 'Gasto registrado';
-    const montoTxt = formatearMonedaGS_(nuevoMonto);
-    const restoTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
-      ? (' · Queda para hoy: ' + String(data.disponibleHoyTexto).trim())
-      : '';
-    const notif = {
-      id: 'ntf_' + Utilities.getUuid(),
-      tipo: 'gasto',
-      de: usuario,
-      para: paraUsuario,
-      titulo: 'Tu amorcito registró un gasto en la aplicación',
-      cuerpo: descLimpia + ': ' + montoTxt + restoTxt,
-      creadoEn: new Date().toISOString()
+    obj = {
+      id: id,
+      tipo: data.tipo,
+      fechasAfectadas: fechas,
+      monto: nuevoMonto,
+      montoPorFecha: nuevoMonto / fechas.length,
+      descripcion: (data.descripcion || '').trim(),
+      usuario: usuario,
+      fromBag: nuevoFromBag,
+      creadoEn: data.creadoEn || (movExistente ? movExistente.creadoEn : new Date().toISOString())
     };
-    setConfigValores_({ ultimaNotificacion: JSON.stringify(notif) });
-    enviarWebPushOneSignal_(cfg, paraUsuario, notif.titulo, notif.cuerpo, notif);
+
+    const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
+    if (!actualizado) agregarFila_('Movimientos', obj);
+
+    const configCambios = {
+      homeBankingTotal: hbTotal,
+      bolsaTotal: bolsaTotal
+    };
+
+    if (!movExistente && !actualizado) {
+      const paraUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
+      const descLimpia = obj.descripcion || 'Gasto registrado';
+      const montoTxt = formatearMonedaGS_(nuevoMonto);
+      const restoTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
+        ? (' · Queda para hoy: ' + String(data.disponibleHoyTexto).trim())
+        : '';
+      notifParaPush = {
+        id: 'ntf_' + Utilities.getUuid(),
+        tipo: 'gasto',
+        de: usuario,
+        para: paraUsuario,
+        titulo: 'Tu amorcito registró un gasto en la aplicación',
+        cuerpo: descLimpia + ': ' + montoTxt + restoTxt,
+        creadoEn: new Date().toISOString()
+      };
+      configCambios.ultimaNotificacion = JSON.stringify(notifParaPush);
+    }
+
+    escribirConfigSinLock_(configCambios);
+  } finally {
+    lock.releaseLock();
+  }
+
+  if (notifParaPush && cfgSnapshot) {
+    enviarWebPushOneSignal_(cfgSnapshot, notifParaPush.para, notifParaPush.titulo, notifParaPush.cuerpo, notifParaPush);
   }
 
   return obj;
 }
 
 function eliminarMovimiento_(id) {
-  const filasMov = leerFilas_('Movimientos');
-  const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const filasMov = leerFilas_('Movimientos');
+    const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
 
-  if (movExistente) {
-    const cfg = leerConfig_();
-    let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-    let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+    if (movExistente) {
+      invalidarCacheSheet_('Config');
+      const cfg = leerConfig_(true);
+      let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
+      let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
-    hbTotal += (movExistente.monto || 0);
-    if (movExistente.fromBag) {
-      bolsaTotal += (movExistente.monto || 0);
+      hbTotal += (movExistente.monto || 0);
+      if (movExistente.fromBag) {
+        bolsaTotal += (movExistente.monto || 0);
+      }
+
+      escribirConfigSinLock_({
+        homeBankingTotal: hbTotal,
+        bolsaTotal: bolsaTotal
+      });
+
+      return borrarFilaPorId_('Movimientos', id);
     }
-
-    setConfigValores_({
-      homeBankingTotal: hbTotal,
-      bolsaTotal: bolsaTotal
-    });
-
-    return borrarFilaPorId_('Movimientos', id);
+    return false;
+  } finally {
+    lock.releaseLock();
   }
-  return false;
 }
 
 function actualizarHB_(payload) {
@@ -658,60 +681,79 @@ function actualizarHB_(payload) {
 
 function limpiarMovimientosPendientes_() {
   const hoyStr = formatearFechaISO_(new Date());
-  const movimientos = leerFilas_('Movimientos');
-  const aBorrar = [];
-  const candidatos = [];
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const movimientos = leerFilas_('Movimientos');
+    const aBorrar = [];
+    const candidatos = [];
 
-  const cfg = leerConfig_();
-  let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-  let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
-  let cambioHB = false;
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
+    let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+    let cambioHB = false;
 
-  movimientos.forEach(m => {
-    const fechas = castValor_('Movimientos', 'fechasAfectadas', m.fechasAfectadas);
-    const afectaHoy = fechas.indexOf(hoyStr) !== -1;
-    const tienePendiente = fechas.some(f => f >= hoyStr);
+    movimientos.forEach(m => {
+      const fechas = castValor_('Movimientos', 'fechasAfectadas', m.fechasAfectadas);
+      const afectaHoy = fechas.indexOf(hoyStr) !== -1;
+      const tienePendiente = fechas.some(f => f >= hoyStr);
 
-    if (!tienePendiente) {
+      if (!tienePendiente) {
+        aBorrar.push(m.id);
+        return;
+      }
+      if (m.tipo === 'single' && afectaHoy) return;
+      if (m.tipo === 'divisible' && afectaHoy) {
+        candidatos.push(limpiarFilaParaCliente_(m));
+        return;
+      }
+
+      hbTotal += (m.monto || 0);
+      if (m.fromBag) bolsaTotal += (m.monto || 0);
+      cambioHB = true;
       aBorrar.push(m.id);
-      return;
-    }
-    if (m.tipo === 'single' && afectaHoy) return;
-    if (m.tipo === 'divisible' && afectaHoy) {
-      candidatos.push(limpiarFilaParaCliente_(m));
-      return;
-    }
-    
-    hbTotal += (m.monto || 0);
-    if (m.fromBag) bolsaTotal += (m.monto || 0);
-    cambioHB = true;
-    aBorrar.push(m.id);
-  });
+    });
 
-  if (cambioHB) {
-    setConfigValores_({ homeBankingTotal: hbTotal, bolsaTotal: bolsaTotal });
+    if (cambioHB) {
+      escribirConfigSinLock_({ homeBankingTotal: hbTotal, bolsaTotal: bolsaTotal });
+    }
+
+    aBorrar.forEach(id => borrarFilaPorId_('Movimientos', id));
+    return { borrados: aBorrar.length, candidatos: candidatos };
+  } finally {
+    lock.releaseLock();
   }
-
-  aBorrar.forEach(id => borrarFilaPorId_('Movimientos', id));
-  return { borrados: aBorrar.length, candidatos: candidatos };
 }
 
 function resolverCierreDia_(payload) {
-  const cfg = leerConfig_();
-  let bolsaActual = getConfigNumero_(cfg, 'bolsaTotal', 0);
-
-  if (payload.decision === 'bolsa') {
-    if (payload.tipo === 'sobrante') {
-      bolsaActual += payload.monto;
-    } else {
-      bolsaActual = Math.max(bolsaActual - payload.monto, 0);
-    }
-    setConfigValores_({ bolsaTotal: bolsaActual });
-  }
-
   const hoyStr = formatearFechaISO_(new Date());
-  setConfigValores_({ lastProcessedDate: hoyStr });
-  return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    let bolsaActual = getConfigNumero_(cfg, 'bolsaTotal', 0);
+
+    if (cfg.lastProcessedDate === hoyStr) {
+      return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr, alreadyProcessed: true };
+    }
+
+    const cambios = { lastProcessedDate: hoyStr };
+    if (payload.decision === 'bolsa') {
+      if (payload.tipo === 'sobrante') {
+        bolsaActual += payload.monto;
+      } else {
+        bolsaActual = Math.max(bolsaActual - payload.monto, 0);
+      }
+      cambios.bolsaTotal = bolsaActual;
+    }
+
+    escribirConfigSinLock_(cambios);
+    return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function actualizarConfig_(cambios) {
@@ -770,7 +812,6 @@ function registrarPushSub_(payload) {
   if (usuario !== 'Brian' && usuario !== 'Virginia') throw new Error('Usuario inválido');
   if (!subscriptionId) throw new Error('subscriptionId requerido');
 
-  const cfg = leerConfig_();
   const parseList = (raw) => String(raw || '')
     .split(',')
     .map(s => s.trim())
@@ -780,14 +821,22 @@ function registrarPushSub_(payload) {
   const otroUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
   const otroKey = 'pushSub_' + otroUsuario;
 
-  const nextList = [subscriptionId].concat(parseList(cfg[key]).filter(id => id !== subscriptionId)).slice(0, 3);
-  const otroList = parseList(cfg[otroKey]).filter(id => id !== subscriptionId);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    const nextList = [subscriptionId].concat(parseList(cfg[key]).filter(id => id !== subscriptionId)).slice(0, 3);
+    const otroList = parseList(cfg[otroKey]).filter(id => id !== subscriptionId);
 
-  setConfigValores_({
-    [key]: nextList.join(','),
-    [otroKey]: otroList.join(',')
-  });
-  return { ok: true, key: key, subscriptionId: subscriptionId, subscriptionIds: nextList };
+    escribirConfigSinLock_({
+      [key]: nextList.join(','),
+      [otroKey]: otroList.join(',')
+    });
+    return { ok: true, key: key, subscriptionId: subscriptionId, subscriptionIds: nextList };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function enviarWebPushOneSignal_(cfg, paraUsuario, titulo, cuerpo, dataExtra) {
@@ -798,14 +847,24 @@ function enviarWebPushOneSignal_(cfg, paraUsuario, titulo, cuerpo, dataExtra) {
   }
 
   try {
-    const subIds = String(cfg['pushSub_' + paraUsuario] || '')
+    const deUsuario = String((dataExtra && dataExtra.de) || '').trim();
+    const senderSubIds = deUsuario
+      ? String(cfg['pushSub_' + deUsuario] || '').split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    const rawParaIds = String(cfg['pushSub_' + paraUsuario] || '')
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
+    const subIds = rawParaIds.filter(id => senderSubIds.indexOf(id) === -1);
 
-    const targetUrl = (dataExtra && dataExtra.tipo === 'mensaje')
+    const tipo = (dataExtra && dataExtra.tipo) || '';
+    const targetUrl = tipo === 'mensaje'
       ? 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/?openMsg=1'
-      : 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/';
+      : (tipo === 'compras'
+        ? 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/?openShop=1'
+        : 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/');
+
+    const topic = 'multimillonarios_' + (tipo || 'notif') + '_' + paraUsuario;
 
     const basePayload = {
       app_id: appId,
@@ -813,6 +872,8 @@ function enviarWebPushOneSignal_(cfg, paraUsuario, titulo, cuerpo, dataExtra) {
       contents: { en: cuerpo, es: cuerpo },
       data: dataExtra || {},
       url: targetUrl,
+      collapse_id: topic,
+      web_push_topic: topic,
       priority: 10,
       ttl: 86400
     };
@@ -836,12 +897,16 @@ function enviarWebPushOneSignal_(cfg, paraUsuario, titulo, cuerpo, dataExtra) {
       try { parsed = JSON.parse(res.getContentText()); } catch (_) { parsed = null; }
     }
 
-    const noSubDelivered = !res || !parsed || !parsed.id || parsed.recipients === 0 || (Array.isArray(parsed.errors) && parsed.errors.length > 0);
-    if (noSubDelivered) {
+    const noSubDelivered = !res || !parsed || !parsed.id || parsed.recipients === 0;
+    if (noSubDelivered && (subIds.length > 0 || rawParaIds.length === 0)) {
       res = postOneSignal(Object.assign({}, basePayload, {
         include_aliases: { external_id: [paraUsuario] },
         target_channel: 'push'
       }));
+    }
+
+    if (!res) {
+      return { sent: false, reason: 'no_recipient_subscription' };
     }
 
     return { sent: true, status: res.getResponseCode(), response: res.getContentText() };
@@ -865,35 +930,69 @@ function normalizarItemListaCompras_(it) {
 }
 
 function guardarListaCompras_(payload) {
+  let lista = [];
+  let notifParaPush = null;
+  let cfgSnapshot = null;
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     invalidarCacheSheet_('Config');
     const cfg = leerConfig_(true);
+    cfgSnapshot = cfg;
     const parsed = parseJsonConfig_(cfg.listaCompras);
-    let lista = Array.isArray(parsed)
+    lista = Array.isArray(parsed)
       ? parsed.map(normalizarItemListaCompras_).filter(Boolean)
       : [];
 
+    const usuario = String(
+      (payload && payload.usuario) ||
+      (payload && payload.item && payload.item.autor) ||
+      cfg.usuarioDefault ||
+      'Brian'
+    ).trim();
+    const paraUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
+
     const op = String((payload && payload.op) || '').trim();
+    let notifSubtipo = '';
+    const itemsAfectados = [];
+
     if (op === 'add' && payload.item) {
       const nuevo = normalizarItemListaCompras_(payload.item);
       if (nuevo) {
         const idx = lista.findIndex(x => String(x.id) === nuevo.id);
-        if (idx >= 0) lista[idx] = nuevo;
-        else lista.unshift(nuevo);
+        if (idx >= 0) {
+          lista[idx] = nuevo;
+        } else {
+          lista.unshift(nuevo);
+          if (!nuevo.done) {
+            notifSubtipo = 'add';
+            itemsAfectados.push(nuevo.texto);
+          }
+        }
       }
     } else if (op === 'toggle' && payload.id) {
       const targetId = String(payload.id).trim();
       const idx = lista.findIndex(x => String(x.id) === targetId);
       if (idx >= 0) {
-        lista[idx].done = payload.done !== undefined ? !!payload.done : !lista[idx].done;
-      } else if (Array.isArray(payload.items)) {
-        lista = payload.items.map(normalizarItemListaCompras_).filter(Boolean);
+        const estabaHecho = !!lista[idx].done;
+        const nuevoHecho = payload.done !== undefined ? !!payload.done : !estabaHecho;
+        lista[idx].done = nuevoHecho;
+        if (nuevoHecho !== estabaHecho) {
+          notifSubtipo = nuevoHecho ? 'remove' : 'add';
+          itemsAfectados.push(lista[idx].texto);
+        }
       }
     } else if (op === 'delete' && payload.id) {
       const targetId = String(payload.id).trim();
-      lista = lista.filter(x => String(x.id) !== targetId);
+      const idx = lista.findIndex(x => String(x.id) === targetId);
+      if (idx >= 0) {
+        if (!lista[idx].done) {
+          notifSubtipo = 'remove';
+          itemsAfectados.push(lista[idx].texto);
+        }
+        lista.splice(idx, 1);
+      }
     } else if (op === 'clearDone') {
       lista = lista.filter(x => !x.done);
     } else if (Array.isArray(payload && payload.items)) {
@@ -901,11 +1000,54 @@ function guardarListaCompras_(payload) {
     }
 
     if (lista.length > 150) lista = lista.slice(0, 150);
-    escribirConfigSinLock_({ listaCompras: JSON.stringify(lista) });
-    return { ok: true, listaCompras: lista };
+
+    const configCambios = { listaCompras: JSON.stringify(lista) };
+
+    if (notifSubtipo && itemsAfectados.length > 0) {
+      const prevNotif = parseJsonConfig_(cfg.ultimaNotificacion);
+      let itemsFinales = [];
+      if (
+        prevNotif &&
+        prevNotif.tipo === 'compras' &&
+        prevNotif.de === usuario &&
+        prevNotif.para === paraUsuario &&
+        prevNotif.subtipo === notifSubtipo &&
+        Array.isArray(prevNotif.items) &&
+        (Date.now() - Date.parse(prevNotif.creadoEn || '') < 60000)
+      ) {
+        itemsFinales = prevNotif.items.map(x => String(x || '').trim()).filter(Boolean);
+      }
+      itemsAfectados.forEach(txt => {
+        if (txt && itemsFinales.indexOf(txt) === -1) itemsFinales.push(txt);
+      });
+      itemsFinales = itemsFinales.slice(0, 15);
+
+      notifParaPush = {
+        id: 'shp_ntf_' + Utilities.getUuid(),
+        tipo: 'compras',
+        subtipo: notifSubtipo,
+        items: itemsFinales,
+        de: usuario,
+        para: paraUsuario,
+        titulo: notifSubtipo === 'add'
+          ? 'Tu amorcito agregó a la lista de compras:'
+          : 'Tu amorcito quitó de la lista de compras:',
+        cuerpo: itemsFinales.map(x => '- ' + x).join('\n'),
+        creadoEn: new Date().toISOString()
+      };
+      configCambios.ultimaNotificacion = JSON.stringify(notifParaPush);
+    }
+
+    escribirConfigSinLock_(configCambios);
   } finally {
     lock.releaseLock();
   }
+
+  if (notifParaPush && cfgSnapshot) {
+    enviarWebPushOneSignal_(cfgSnapshot, notifParaPush.para, notifParaPush.titulo, notifParaPush.cuerpo, notifParaPush);
+  }
+
+  return { ok: true, listaCompras: lista, notif: notifParaPush };
 }
 
 // ============================================================
