@@ -22,23 +22,15 @@ const appState = {
   movimientos: [],
   listaCompras: [],
   lastProcessedDate: null,
-  ultimaNotificacion: null,
-  ultimoMensaje: null,
-  onesignalAppId: ''
+  whatsappConfigured: false
 };
 
 const PRESET_COUPLE_MESSAGES = [
   'Te amo mucho ❤️',
-  'Ya actualicé la aplicación, te amo mucho ❤️',
-  'Revisá la lista de compras 🛒❤️'
+  'Ya actualicé la aplicación, te amo mucho ❤️'
 ];
 
-let onesignalInitializedAppId_ = null;
-let notifBannerTimer_ = null;
-let notifPollTimer_ = null;
-let pendingOpenQuickMsgFromNotif_ = false;
-let pointerDownInsideBanner_ = false;
-let pointerDownBannerTimer_ = null;
+let autoSyncTimer_ = null;
 let wasKeyboardOpen_ = false;
 
 let txModalSubtype = 'single';
@@ -993,17 +985,11 @@ function pintarBotonesUsuario_() {
 
 function setActiveUser(user) {
   resetTxForm_();
-  cerrarBannerNotificacion(false);
   appState.activeUser = user;
   localStorage.setItem('userActive', user);
   aplicarPaletaUsuario_(user);
   pintarBotonesUsuario_();
   renderMicroView();
-  sincronizarUsuarioPush_(user);
-  chequearMensajeRecibido_(appState.ultimoMensaje);
-  const notificadoAhora = chequearNotificacionEntrante_(appState.ultimaNotificacion);
-  if (!notificadoAhora) mostrarBannerMensajeSinLeerSiCorresponde_();
-  actualizarIndicadorMensajes_();
 }
 
 
@@ -1125,9 +1111,7 @@ function guardarCacheDiarioLocal_() {
       movimientos: appState.movimientos,
       listaCompras: appState.listaCompras,
       lastProcessedDate: appState.lastProcessedDate,
-      ultimaNotificacion: appState.ultimaNotificacion,
-      ultimoMensaje: appState.ultimoMensaje,
-      onesignalAppId: appState.onesignalAppId
+      whatsappConfigured: appState.whatsappConfigured
     }));
   } catch (e) {}
 }
@@ -1259,49 +1243,15 @@ async function handleVaciarBolsaAhorro() {
 }
 
 function initOutsideCardTapToClose_() {
-  const marcarInicioEnBanner = (e) => {
-    const t = e && e.target;
-    pointerDownInsideBanner_ = !!(t && typeof t.closest === 'function' && t.closest('#incoming-notif-banner'));
-    if (pointerDownBannerTimer_) {
-      clearTimeout(pointerDownBannerTimer_);
-      pointerDownBannerTimer_ = null;
-    }
-    if (pointerDownInsideBanner_) {
-      pointerDownBannerTimer_ = setTimeout(() => {
-        pointerDownInsideBanner_ = false;
-        pointerDownBannerTimer_ = null;
-      }, 500);
-    }
-  };
-  document.addEventListener('pointerdown', marcarInicioEnBanner, true);
-  document.addEventListener('mousedown', marcarInicioEnBanner, true);
-  document.addEventListener('touchstart', marcarInicioEnBanner, { capture: true, passive: true });
-
   document.addEventListener('click', (e) => {
     const target = e.target;
-    if (!target || typeof target.closest !== 'function') {
-      pointerDownInsideBanner_ = false;
-      return;
-    }
-
-    const banner = document.getElementById('incoming-notif-banner');
-    if (banner && !banner.classList.contains('hidden') && banner.classList.contains('expanded')) {
-      const clickedInsideBanner = !!target.closest('#incoming-notif-banner');
-      const cameFromBannerPointer = pointerDownInsideBanner_;
-      pointerDownInsideBanner_ = false;
-      if (!clickedInsideBanner && !cameFromBannerPointer) {
-        cerrarBannerNotificacion(true);
-      }
-      return;
-    }
-    pointerDownInsideBanner_ = false;
+    if (!target || typeof target.closest !== 'function') return;
 
     if (
       target.closest('.card-dark-main') ||
       target.closest('.avatar-btn') ||
       target.closest('.msg-header-btn') ||
-      target.closest('.modal-overlay') ||
-      target.closest('#incoming-notif-banner')
+      target.closest('.modal-overlay')
     ) {
       return;
     }
@@ -1360,7 +1310,7 @@ async function resolverCandidatoLimpiar(accion) {
   mostrarSyncToast_();
   try {
     if (accion === 'borrar') {
-      await callBackend('eliminarMovimiento', { id: candidato.id });
+      await callBackend('eliminarMovimiento', { id: candidato.id, silencioso: true });
     } else if (accion === 'single') {
       await callBackend('guardarMovimiento', {
         id: candidato.id,
@@ -1369,7 +1319,8 @@ async function resolverCandidatoLimpiar(accion) {
         monto: candidato.montoPorFecha,
         descripcion: candidato.descripcion,
         usuario: candidato.usuario,
-        fromBag: candidato.fromBag
+        fromBag: candidato.fromBag,
+        silencioso: true
       });
     }
     await recargarEstadoDiario_(false);
@@ -1907,6 +1858,7 @@ async function handleFormSubmit() {
     monto: monto,
     descripcion: descripcion,
     usuario: userToSave,
+    actorUsuario: appState.activeUser,
     fromBag: fromBag,
     disponibleHoyTexto: disponibleHoyTexto
   }).then(() => recargarEstadoDiario_(false));
@@ -1927,7 +1879,13 @@ async function deleteCurrentEditingTransaction() {
     renderMicroView();
   }
 
-  callBackendBackground('eliminarMovimiento', { id: idToDelete })
+  const disponibleHoyTexto = formatearMoneda_(presupuestoParaFecha_(hoyISO_()));
+
+  callBackendBackground('eliminarMovimiento', {
+    id: idToDelete,
+    usuario: appState.activeUser,
+    disponibleHoyTexto: disponibleHoyTexto
+  })
     .then(() => recargarEstadoDiario_(false));
 }
 
@@ -2099,11 +2057,6 @@ function closeAllActiveModalsWithoutSaving_() {
   toggleFutureDaysModal(false);
   setMicroSubView('list', false);
 
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && banner.classList.contains('expanded')) {
-    cerrarBannerNotificacion(true);
-  }
-
   // Destrucción obligatoria de estado en formularios (Zero-Draft Persistence)
   resetTxForm_();
 
@@ -2116,12 +2069,6 @@ function closeAllActiveModalsWithoutSaving_() {
 }
 
 function closeTopActiveLayer_() {
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && !banner.classList.contains('hidden') && banner.classList.contains('expanded')) {
-    cerrarBannerNotificacion(true);
-    return;
-  }
-
   const activeOverlays = Array.from(document.querySelectorAll('.modal-overlay.active, .modal.active'));
   if (activeOverlays.length) {
     activeOverlays[activeOverlays.length - 1].classList.remove('active');
@@ -2148,11 +2095,6 @@ function pushModalHistory_(modalId) {
 
 // Helper: Determina el identificador de la pantalla visible ACTUAL
 function getCurrentScreenState() {
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && !banner.classList.contains('hidden') && banner.classList.contains('expanded')) {
-    return 'MODAL';
-  }
-
   const activeModal = document.querySelector('.modal-overlay.active, .modal.active');
   if (activeModal) return 'MODAL';
 
@@ -2238,9 +2180,6 @@ function initAndroidBackHistory_() {
 }
 
 function isAnyCardSubviewOrModalActive_() {
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && !banner.classList.contains('hidden') && banner.classList.contains('expanded')) return true;
-
   if (document.querySelector('.modal-overlay.active, .modal.active')) return true;
 
   const hb = document.getElementById('hb-modal');
@@ -2373,7 +2312,7 @@ function ensureMessageModalSendVisible_() {
   } catch (e) {}
 }
 
-/** Mantiene barras flotantes, banner de notificación y modales alineados con el viewport y el teclado virtual. */
+/** Mantiene barras flotantes y modales alineados con el viewport y el teclado virtual. */
 function updateFloatingCircleButtonsPosition() {
   const bars = document.querySelectorAll('.floating-actions-bar');
   const winH = typeof window.innerHeight === 'number' && window.innerHeight > 0 ? window.innerHeight : 800;
@@ -2404,13 +2343,6 @@ function updateFloatingCircleButtonsPosition() {
     bars.forEach(bar => {
       bar.style.bottom = bottomValue;
     });
-  }
-
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && !banner.classList.contains('hidden')) {
-    banner.style.bottom = isKeyboardOpen ? (keyboardInset + 12) + 'px' : '';
-  } else if (banner) {
-    banner.style.bottom = '';
   }
 
   syncModalOverlayToViewport_('message-modal', 'message-modal-card', vvHeight, vvOffsetTop, isKeyboardOpen);
@@ -2529,9 +2461,7 @@ function cargarCacheDiarioLocal_() {
   if (Array.isArray(parsed.movimientos)) appState.movimientos = parsed.movimientos;
   if (Array.isArray(parsed.listaCompras)) appState.listaCompras = normalizarListaCompras_(parsed.listaCompras);
   if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = parsed.lastProcessedDate;
-  if (parsed.ultimaNotificacion !== undefined) appState.ultimaNotificacion = parsed.ultimaNotificacion;
-  if (parsed.ultimoMensaje !== undefined) appState.ultimoMensaje = parsed.ultimoMensaje;
-  if (parsed.onesignalAppId !== undefined) appState.onesignalAppId = parsed.onesignalAppId;
+  if (parsed.whatsappConfigured !== undefined) appState.whatsappConfigured = !!parsed.whatsappConfigured;
   return true;
 }
 
@@ -2549,9 +2479,7 @@ function aplicarEstadoDiario_(data) {
     appState.listaCompras = normalizarListaCompras_(data.listaCompras);
   }
   appState.lastProcessedDate = normalizarFechaConfig_(data.lastProcessedDate, hoyISO_());
-  appState.ultimaNotificacion = data.ultimaNotificacion || null;
-  appState.ultimoMensaje = data.ultimoMensaje || null;
-  appState.onesignalAppId = String(data.onesignalAppId || '').trim();
+  appState.whatsappConfigured = !!data.whatsappConfigured;
   guardarCacheDiarioLocal_();
   renderMicroView();
   refrescarVistaHbModalSiAbierto_();
@@ -2559,15 +2487,6 @@ function aplicarEstadoDiario_(data) {
   const shoppingModal = document.getElementById('shopping-modal');
   if (shoppingModal && shoppingModal.classList.contains('active')) {
     renderShoppingList_();
-  }
-  if (appState.onesignalAppId) initOneSignalPush_(appState.onesignalAppId);
-  chequearMensajeRecibido_(appState.ultimoMensaje);
-  const notificadoAhora = chequearNotificacionEntrante_(appState.ultimaNotificacion);
-  if (!notificadoAhora) mostrarBannerMensajeSinLeerSiCorresponde_();
-  actualizarIndicadorMensajes_();
-  if (pendingOpenQuickMsgFromNotif_) {
-    pendingOpenQuickMsgFromNotif_ = false;
-    abrirVistaMensajeDesdeNotificacion_();
   }
 }
 
@@ -2597,12 +2516,6 @@ async function bootstrapEstado_() {
     if (miToken === diarioLoadToken_ && cargarCacheDiarioLocal_()) {
       renderMicroView();
       actualizarBadgeListaCompras_();
-      actualizarIndicadorMensajes_();
-      mostrarBannerMensajeSinLeerSiCorresponde_();
-      if (pendingOpenQuickMsgFromNotif_ && leerMensajeGuardadoParaUsuario_(appState.activeUser)) {
-        pendingOpenQuickMsgFromNotif_ = false;
-        abrirVistaRapidaMensaje_();
-      }
     }
   } catch (e) {}
 
@@ -2701,110 +2614,11 @@ window.exportarRespaldoEstado = function() {
 };
 
 // ============================================================
-// MENSAJES Y NOTIFICACIONES DE PAREJA
+// MENSAJES DE PAREJA VÍA WHATSAPP
 // ============================================================
 
 function getOtroUsuario_(usuario) {
   return usuario === 'Virginia' ? 'Brian' : 'Virginia';
-}
-
-function getLastReceivedMsgStorageKey_(usuario) {
-  return 'lastMsgPara_' + usuario;
-}
-
-function getLastOpenedMsgStorageKey_(usuario) {
-  return 'lastOpenedMsgId_' + usuario;
-}
-
-function getLastSeenNotifStorageKey_(usuario) {
-  return 'lastSeenNotifId_' + usuario;
-}
-
-function leerMensajeGuardadoParaUsuario_(usuario) {
-  const ultimo = appState.ultimoMensaje;
-  if (ultimo && ultimo.id && (!ultimo.para || ultimo.para === usuario) && ultimo.de !== usuario) {
-    return ultimo;
-  }
-  try {
-    const raw = localStorage.getItem(getLastReceivedMsgStorageKey_(usuario));
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function chequearMensajeRecibido_(msg) {
-  if (!msg || !msg.id) return;
-  if (msg.para && msg.para !== appState.activeUser) return;
-  if (msg.de === appState.activeUser) return;
-  try {
-    localStorage.setItem(getLastReceivedMsgStorageKey_(appState.activeUser), JSON.stringify(msg));
-  } catch (e) {}
-  const modal = document.getElementById('message-modal');
-  if (modal && modal.classList.contains('active')) {
-    renderReceivedMessageBox_();
-    try {
-      localStorage.setItem(getLastOpenedMsgStorageKey_(appState.activeUser), msg.id);
-    } catch (e) {}
-  }
-}
-
-function actualizarIndicadorMensajes_() {
-  const dot = document.getElementById('msg-unread-dot');
-  if (!dot) return;
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  const openedId = localStorage.getItem(getLastOpenedMsgStorageKey_(appState.activeUser)) || '';
-  const modal = document.getElementById('message-modal');
-  const modalAbierto = !!(modal && modal.classList.contains('active'));
-  if (!modalAbierto && msg && msg.id && msg.id !== openedId) {
-    dot.classList.remove('hidden');
-  } else {
-    dot.classList.add('hidden');
-  }
-}
-
-function formatearHoraCorta_(isoStr) {
-  if (!isoStr) return '';
-  try {
-    const d = new Date(isoStr);
-    if (isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-  } catch (e) {
-    return '';
-  }
-}
-
-function renderReceivedMessageBox_() {
-  const box = document.getElementById('msg-received-box');
-  if (!box) return;
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  if (!msg || !msg.cuerpo) {
-    box.classList.add('hidden');
-    return;
-  }
-  const fromEl = document.getElementById('msg-received-from');
-  const timeEl = document.getElementById('msg-received-time');
-  const textEl = document.getElementById('msg-received-text');
-  if (fromEl) fromEl.textContent = 'Último mensaje de ' + (msg.de || getOtroUsuario_(appState.activeUser));
-  if (timeEl) timeEl.textContent = formatearHoraCorta_(msg.creadoEn);
-  if (textEl) textEl.textContent = msg.cuerpo;
-  box.classList.remove('hidden');
-}
-
-function marcarMensajeActualComoLeido_() {
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  try {
-    if (msg && msg.id) {
-      localStorage.setItem(getLastOpenedMsgStorageKey_(appState.activeUser), msg.id);
-      localStorage.setItem(getLastSeenNotifStorageKey_(appState.activeUser), msg.id);
-    }
-    const ult = appState.ultimaNotificacion;
-    if (ult && ult.id && ult.tipo === 'mensaje' && (!ult.para || ult.para === appState.activeUser)) {
-      localStorage.setItem(getLastSeenNotifStorageKey_(appState.activeUser), ult.id);
-      localStorage.setItem(getLastOpenedMsgStorageKey_(appState.activeUser), ult.id);
-    }
-  } catch (e) {}
-  actualizarIndicadorMensajes_();
 }
 
 function openMessageModal() {
@@ -2813,11 +2627,6 @@ function openMessageModal() {
   const titleEl = document.getElementById('msg-modal-title');
   const para = getOtroUsuario_(appState.activeUser);
   if (titleEl) titleEl.textContent = '💌 Mensajito para ' + para;
-
-  renderReceivedMessageBox_();
-  marcarMensajeActualComoLeido_();
-  actualizarEstadoPermisoNotificaciones_();
-  cerrarBannerNotificacion(true);
 
   modal.classList.add('active');
   pushModalHistory_('message-modal');
@@ -2863,10 +2672,12 @@ function insertEmoji(emoji) {
   ensureMessageModalSendVisible_();
 }
 
-async function enviarTextoParejaCore_(texto, opciones = {}) {
-  const limpio = String(texto || '').trim();
+async function enviarMensajePareja() {
+  const input = document.getElementById('msg-custom-input');
+  const btn = document.getElementById('btn-send-msg');
+  const limpio = String(input ? input.value : '').trim().slice(0, 500);
   if (!limpio) {
-    if (opciones.focusEl) opciones.focusEl.focus();
+    if (input) input.focus();
     showAppToast('Escribí o elegí un mensajito primero', true);
     return false;
   }
@@ -2874,18 +2685,10 @@ async function enviarTextoParejaCore_(texto, opciones = {}) {
   const de = appState.activeUser;
   const para = getOtroUsuario_(de);
   const payload = { texto: limpio, de: de, para: para };
-  const desdeBanner = !!opciones.desdeBanner;
 
   const finalizarEnvioUI = () => {
-    if (desdeBanner) {
-      const qrInput = document.getElementById('quick-reply-input');
-      if (qrInput) qrInput.value = '';
-      cerrarBannerNotificacion(true);
-    } else {
-      const msgInput = document.getElementById('msg-custom-input');
-      if (msgInput) msgInput.value = '';
-      closeMessageModal();
-    }
+    if (input) input.value = '';
+    closeMessageModal();
   };
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -2894,23 +2697,23 @@ async function enviarTextoParejaCore_(texto, opciones = {}) {
     return true;
   }
 
-  const btns = (opciones.botones || []).filter(Boolean);
-  const textosPrevios = btns.map(b => b.textContent);
-  btns.forEach(b => { b.disabled = true; });
-  if (btns[0]) btns[0].textContent = 'Enviando...';
+  const textoPrevio = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Enviando...';
+  }
 
   try {
     const res = await callBackend('enviarMensaje', payload);
-    if (res && res.notif) {
-      appState.ultimaNotificacion = res.notif;
-      appState.ultimoMensaje = res.notif;
-      try {
-        localStorage.setItem(getLastSeenNotifStorageKey_(de), res.notif.id);
-      } catch (e) {}
-      guardarCacheDiarioLocal_();
-    }
     finalizarEnvioUI();
-    showAppToast((desdeBanner ? '💌 Respuesta enviada a ' : '💌 Mensajito enviado a ') + para);
+    const wa = res && res.whatsapp ? res.whatsapp : null;
+    if (wa && wa.sent) {
+      showAppToast('💬 Enviado al grupo de WhatsApp');
+    } else if (wa && wa.reason === 'missing_greenapi_config') {
+      showAppToast('Falta configurar Green API en la hoja Config', true);
+    } else {
+      showAppToast('No se pudo enviar al grupo de WhatsApp', true);
+    }
     return true;
   } catch (err) {
     if (isNetworkOrTimeoutError_(err)) {
@@ -2921,393 +2724,65 @@ async function enviarTextoParejaCore_(texto, opciones = {}) {
     showAppToast(err && err.message ? err.message : 'No se pudo enviar el mensaje', true);
     return false;
   } finally {
-    btns.forEach((b, idx) => {
-      b.disabled = false;
-      b.textContent = textosPrevios[idx];
-    });
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = textoPrevio;
+    }
   }
 }
 
-async function enviarMensajePareja() {
-  const input = document.getElementById('msg-custom-input');
-  const btn = document.getElementById('btn-send-msg');
-  return enviarTextoParejaCore_(input ? input.value : '', {
-    focusEl: input,
-    botones: [btn],
-    desdeBanner: false
-  });
-}
+async function enviarListaComprasWhatsApp() {
+  const btn = document.getElementById('btn-send-shopping-wa');
+  const payload = { de: appState.activeUser };
 
-async function enviarRespuestaRapidaBanner(texto) {
-  const btnLove = document.getElementById('btn-quick-reply-love');
-  const btnSend = document.getElementById('btn-quick-reply-send');
-  return enviarTextoParejaCore_(texto, {
-    botones: [btnLove, btnSend],
-    desdeBanner: true
-  });
-}
-
-async function enviarRespuestaRapidaInput() {
-  const input = document.getElementById('quick-reply-input');
-  const btnSend = document.getElementById('btn-quick-reply-send');
-  const btnLove = document.getElementById('btn-quick-reply-love');
-  return enviarTextoParejaCore_(input ? input.value : '', {
-    focusEl: input,
-    botones: [btnSend, btnLove],
-    desdeBanner: true
-  });
-}
-
-function actualizarEstadoPermisoNotificaciones_() {
-  const statusEl = document.getElementById('msg-notif-status');
-  const btnEl = document.getElementById('btn-enable-notifications');
-  if (!statusEl || !btnEl) return;
-
-  if (typeof Notification === 'undefined') {
-    statusEl.textContent = 'ℹ️ Abrí la app desde Chrome o instálala en el teléfono para recibir avisos.';
-    btnEl.textContent = '🔔 Probar aviso visual';
-    return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    callBackendBackground('enviarListaComprasWhatsApp', payload);
+    closeMessageModal();
+    return true;
   }
 
-  const perm = Notification.permission;
-  if (perm === 'granted') {
-    const linkedSubId = String(localStorage.getItem('pushSubSent_' + appState.activeUser) || '').trim();
-    if (appState.onesignalAppId && linkedSubId) {
-      statusEl.textContent = '✅ Notificaciones y push con app cerrada activas (' + appState.activeUser + ').';
-    } else if (appState.onesignalAppId) {
-      statusEl.textContent = '⏳ Permiso activo, vinculando push con app cerrada para ' + appState.activeUser + '... Tocá el botón si demora.';
+  const textoPrevio = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Enviando lista...';
+  }
+
+  try {
+    const res = await callBackend('enviarListaComprasWhatsApp', payload);
+    closeMessageModal();
+    const wa = res && res.whatsapp ? res.whatsapp : null;
+    if (wa && wa.sent) {
+      showAppToast('🛒 Lista de compras enviada al grupo de WhatsApp');
+    } else if (wa && wa.reason === 'missing_greenapi_config') {
+      showAppToast('Falta configurar Green API en la hoja Config', true);
     } else {
-      statusEl.textContent = '✅ Notificaciones del sistema activas en este teléfono.';
+      showAppToast('No se pudo enviar al grupo de WhatsApp', true);
     }
-    btnEl.textContent = '🔔 Probar notificación y sincronizar push';
-  } else if (perm === 'denied') {
-    statusEl.textContent = '⚠️ Permiso bloqueado: habilitá notificaciones en la configuración del navegador.';
-    btnEl.textContent = '🔔 Reintentar permiso de notificaciones';
-  } else {
-    statusEl.textContent = '🔕 Tocá el botón para activar sonido, vibración y notificaciones.';
-    btnEl.textContent = '🔔 Activar notificaciones en este teléfono';
-  }
-}
-
-async function activarNotificacionesDispositivo() {
-  if (typeof Notification === 'undefined') {
-    reproducirSonidoNotificacion_();
-    mostrarBannerNotificacion_({
-      tipo: 'mensaje',
-      titulo: '💌 Avisos dentro de la app activos',
-      cuerpo: 'Este navegador no soporta notificaciones nativas fuera de la app.'
-    });
-    return;
-  }
-
-  let perm = Notification.permission;
-  if (perm === 'denied') {
-    actualizarEstadoPermisoNotificaciones_();
-    showAppToast('Habilitá las notificaciones en Ajustes del navegador', true);
-    return;
-  }
-
-  if (perm !== 'granted') {
-    perm = await Notification.requestPermission();
-  }
-
-  actualizarEstadoPermisoNotificaciones_();
-
-  if (perm === 'granted') {
-    sincronizarUsuarioPush_(appState.activeUser, true);
-    reproducirSonidoNotificacion_();
-    await mostrarNotificacionNativa_(
-      '🔔 Notificaciones activadas',
-      'Ya vas a recibir mensajitos y gastos de ' + getOtroUsuario_(appState.activeUser),
-      'notif-test'
-    );
-    showAppToast('🔔 Notificaciones activadas');
-  } else {
-    showAppToast('No se activaron las notificaciones', true);
-  }
-}
-
-function initOneSignalPush_(appId) {
-  if (!appId || onesignalInitializedAppId_ === appId || typeof window === 'undefined') return;
-  onesignalInitializedAppId_ = appId;
-  let basePath = '/';
-  let workerScope = '/push/onesignal/';
-  try {
-    const baseUrl = new URL('./', window.location.href);
-    basePath = baseUrl.pathname.endsWith('/') ? baseUrl.pathname : (baseUrl.pathname + '/');
-    workerScope = new URL('push/onesignal/', baseUrl).pathname;
-  } catch (e) {}
-
-  window.OneSignalDeferred = window.OneSignalDeferred || [];
-  window.OneSignalDeferred.push(async function(OneSignal) {
-    try {
-      await OneSignal.init({
-        appId: appId,
-        allowLocalhostAsSecureOrigin: true,
-        serviceWorkerOverrideForTypical: true,
-        path: basePath,
-        serviceWorkerPath: 'push/onesignal/OneSignalSDKWorker.js',
-        serviceWorkerParam: { scope: workerScope }
-      });
-      if (OneSignal.User && OneSignal.User.PushSubscription && typeof OneSignal.User.PushSubscription.addEventListener === 'function') {
-        OneSignal.User.PushSubscription.addEventListener('change', async () => {
-          await guardarPushSubscriptionBackend_(appState.activeUser, OneSignal, false);
-          actualizarEstadoPermisoNotificaciones_();
-        });
-      }
-      if (OneSignal.Notifications && typeof OneSignal.Notifications.addEventListener === 'function') {
-        OneSignal.Notifications.addEventListener('click', () => {
-          abrirVistaMensajeDesdeNotificacion_();
-        });
-      }
-      await sincronizarUsuarioPush_(appState.activeUser, false);
-    } catch (err) {
-      console.warn('Error inicializando OneSignal:', err);
-    }
-  });
-}
-
-function sincronizarUsuarioPush_(user, optInIfNeeded) {
-  if (!appState.onesignalAppId || typeof window === 'undefined' || !window.OneSignalDeferred) return;
-  window.OneSignalDeferred.push(async function(OneSignal) {
-    try {
-      if (typeof OneSignal.login === 'function') {
-        await OneSignal.login(user);
-      }
-      if (OneSignal.User && typeof OneSignal.User.addTag === 'function') {
-        await OneSignal.User.addTag('usuario', user);
-      }
-      const subObj = OneSignal.User && OneSignal.User.PushSubscription ? OneSignal.User.PushSubscription : null;
-      const permGranted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
-      if (subObj && typeof subObj.optIn === 'function' && (optInIfNeeded || (permGranted && (!subObj.optedIn || !subObj.id)))) {
-        await subObj.optIn();
-      }
-      await guardarPushSubscriptionBackend_(user, OneSignal, !!optInIfNeeded);
-      setTimeout(() => { guardarPushSubscriptionBackend_(appState.activeUser, OneSignal, false); }, 2000);
-      setTimeout(() => { guardarPushSubscriptionBackend_(appState.activeUser, OneSignal, false); }, 5000);
-    } catch (e) {}
-  });
-}
-
-async function guardarPushSubscriptionBackend_(user, OneSignal, forceResend) {
-  try {
-    const subId = OneSignal && OneSignal.User && OneSignal.User.PushSubscription
-      ? String(OneSignal.User.PushSubscription.id || '').trim()
-      : '';
-    if (!subId) return;
-    const sentKey = 'pushSubSent_' + user;
-    const lastUser = localStorage.getItem('pushSubLastUser') || '';
-    if (!forceResend && lastUser === user && localStorage.getItem(sentKey) === subId) return;
-    await callBackend('registrarPushSub', { usuario: user, subscriptionId: subId });
-    localStorage.setItem(sentKey, subId);
-    localStorage.setItem('pushSubLastUser', user);
-    actualizarEstadoPermisoNotificaciones_();
-  } catch (e) {}
-}
-
-function reproducirSonidoNotificacion_() {
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const ahora = ctx.currentTime;
-    const notas = [659.25, 880];
-    notas.forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, ahora + i * 0.14);
-      gain.gain.setValueAtTime(0.001, ahora + i * 0.14);
-      gain.gain.exponentialRampToValueAtTime(0.14, ahora + i * 0.14 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, ahora + i * 0.14 + 0.28);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ahora + i * 0.14);
-      osc.stop(ahora + i * 0.14 + 0.3);
-    });
-    setTimeout(() => { try { ctx.close(); } catch (e) {} }, 800);
-  } catch (e) {}
-}
-
-async function mostrarNotificacionNativa_(titulo, cuerpo, tag) {
-  try {
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate([200, 100, 200, 100, 300]);
-    }
-  } catch (e) {}
-
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return false;
-
-  const opts = {
-    body: cuerpo || '',
-    icon: './icon-192.png',
-    badge: './icon-192.png',
-    vibrate: [200, 100, 200, 100, 300],
-    tag: tag || 'multimillonarios-msg',
-    renotify: true
-  };
-
-  try {
-    if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
-      const reg = (await navigator.serviceWorker.getRegistration()) || (await navigator.serviceWorker.ready);
-      if (reg && typeof reg.showNotification === 'function') {
-        await reg.showNotification(titulo, opts);
-        return true;
-      }
-    }
-  } catch (e) {}
-
-  try {
-    new Notification(titulo, opts);
     return true;
-  } catch (e) {
+  } catch (err) {
+    if (isNetworkOrTimeoutError_(err)) {
+      callBackendBackground('enviarListaComprasWhatsApp', payload);
+      closeMessageModal();
+      return true;
+    }
+    showAppToast(err && err.message ? err.message : 'No se pudo enviar la lista de compras', true);
     return false;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = textoPrevio;
+    }
   }
 }
 
-function cerrarBannerNotificacion(marcarLeido = false) {
-  if (notifBannerTimer_) {
-    clearTimeout(notifBannerTimer_);
-    notifBannerTimer_ = null;
-  }
-  const banner = document.getElementById('incoming-notif-banner');
-  const estabaVisible = !!(banner && !banner.classList.contains('hidden'));
-  const replyPanel = document.getElementById('incoming-notif-reply-panel');
-  const hint = document.getElementById('incoming-notif-hint');
-  const qrInput = document.getElementById('quick-reply-input');
-  if (qrInput && typeof qrInput.blur === 'function') qrInput.blur();
-  if (replyPanel) replyPanel.classList.add('hidden');
-  if (hint) hint.classList.add('hidden');
-  if (banner) {
-    banner.classList.add('hidden');
-    banner.classList.remove('expanded', 'reply-focused');
-  }
-  if (marcarLeido) marcarMensajeActualComoLeido_();
-  if (estabaVisible) resetAppScrollToTop_();
-}
-
-function mostrarBannerNotificacion_(notif, opciones = {}) {
-  const banner = document.getElementById('incoming-notif-banner');
-  if (!banner || !notif) return;
-  const iconEl = document.getElementById('incoming-notif-icon');
-  const titleEl = document.getElementById('incoming-notif-title');
-  const bodyEl = document.getElementById('incoming-notif-body');
-  const hintEl = document.getElementById('incoming-notif-hint');
-  const replyPanel = document.getElementById('incoming-notif-reply-panel');
-
-  const esGasto = notif.tipo === 'gasto';
-  const yaExpandido = banner.classList.contains('expanded') && !banner.classList.contains('hidden');
-  const expandido = opciones.expandido !== undefined ? !!opciones.expandido : yaExpandido;
-  const persistente = opciones.persistente !== undefined ? !!opciones.persistente : !esGasto;
-
-  if (iconEl) iconEl.textContent = esGasto ? '💸' : '💌';
-  if (titleEl) titleEl.textContent = notif.titulo || 'Novedad en la app';
-  if (bodyEl) bodyEl.textContent = notif.cuerpo || '';
-  if (hintEl) hintEl.classList.toggle('hidden', esGasto || expandido);
-  if (replyPanel) replyPanel.classList.toggle('hidden', !expandido);
-  banner.classList.toggle('expanded', expandido);
-  banner.classList.remove('hidden');
-
-  if (notifBannerTimer_) {
-    clearTimeout(notifBannerTimer_);
-    notifBannerTimer_ = null;
-  }
-  if (!persistente && !expandido) {
-    notifBannerTimer_ = setTimeout(() => {
-      cerrarBannerNotificacion(false);
-    }, 7500);
-  }
-}
-
-function mostrarBannerMensajeSinLeerSiCorresponde_() {
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  if (!msg || !msg.id || !msg.cuerpo) return false;
-  const openedId = localStorage.getItem(getLastOpenedMsgStorageKey_(appState.activeUser)) || '';
-  if (msg.id === openedId) return false;
-
-  const banner = document.getElementById('incoming-notif-banner');
-  if (banner && !banner.classList.contains('hidden') && banner.classList.contains('expanded')) {
-    return true;
-  }
-
-  mostrarBannerNotificacion_({
-    id: msg.id,
-    tipo: 'mensaje',
-    titulo: msg.titulo || ('💌 Mensaje de ' + (msg.de || getOtroUsuario_(appState.activeUser))),
-    cuerpo: msg.cuerpo
-  }, { persistente: true, expandido: false });
-  return true;
-}
-
-function abrirVistaRapidaMensaje_() {
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  marcarMensajeActualComoLeido_();
-  if (!msg || !msg.cuerpo) {
-    openMessageModal();
-    return;
-  }
-  mostrarBannerNotificacion_({
-    id: msg.id,
-    tipo: 'mensaje',
-    titulo: msg.titulo || ('💌 Mensaje de ' + (msg.de || getOtroUsuario_(appState.activeUser))),
-    cuerpo: msg.cuerpo
-  }, { persistente: true, expandido: true });
-  pushModalHistory_('quick-reply-banner');
-}
-
-function alTocarBannerNotificacion(event) {
-  const banner = document.getElementById('incoming-notif-banner');
-  if (!banner || banner.classList.contains('hidden') || banner.classList.contains('expanded')) return;
-  const target = event && event.target;
-  if (target && typeof target.closest === 'function') {
-    if (target.closest('#incoming-notif-reply-panel')) return;
-    if (target.closest('button[aria-label="Cerrar notificación"]')) return;
-  }
-  const iconEl = document.getElementById('incoming-notif-icon');
-  if (iconEl && iconEl.textContent === '💸') {
-    cerrarBannerNotificacion(false);
-    return;
-  }
-  abrirVistaRapidaMensaje_();
-}
-
-function abrirVistaMensajeDesdeNotificacion_() {
-  const msg = leerMensajeGuardadoParaUsuario_(appState.activeUser);
-  const openedId = localStorage.getItem(getLastOpenedMsgStorageKey_(appState.activeUser)) || '';
-  if (msg && msg.id && msg.id !== openedId) {
-    abrirVistaRapidaMensaje_();
-    return;
-  }
-  pendingOpenQuickMsgFromNotif_ = true;
-  recargarEstadoDiario_(false);
-}
-
-function chequearNotificacionEntrante_(notif) {
-  if (!notif || !notif.id) return false;
-  if (notif.para && notif.para !== appState.activeUser) return false;
-  if (notif.de && notif.de === appState.activeUser) return false;
-
-  const seenKey = getLastSeenNotifStorageKey_(appState.activeUser);
-  if (localStorage.getItem(seenKey) === notif.id) return false;
-
-  try {
-    localStorage.setItem(seenKey, notif.id);
-  } catch (e) {}
-
-  reproducirSonidoNotificacion_();
-  mostrarBannerNotificacion_(notif, { persistente: notif.tipo !== 'gasto' });
-  mostrarNotificacionNativa_(notif.titulo, notif.cuerpo, notif.id);
-  return true;
-}
-
-function initNotificacionPolling_() {
-  if (notifPollTimer_) clearInterval(notifPollTimer_);
-  notifPollTimer_ = setInterval(() => {
+function initAutoSyncRefresh_() {
+  if (autoSyncTimer_) clearInterval(autoSyncTimer_);
+  autoSyncTimer_ = setInterval(() => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
     recargarEstadoDiario_(false);
-  }, 25000);
+  }, 30000);
 
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
@@ -3315,14 +2790,6 @@ function initNotificacionPolling_() {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
       recargarEstadoDiario_(false);
-    });
-  }
-
-  if (typeof navigator !== 'undefined' && navigator.serviceWorker && typeof navigator.serviceWorker.addEventListener === 'function') {
-    navigator.serviceWorker.addEventListener('message', e => {
-      if (e.data && e.data.type === 'OPEN_QUICK_MSG') {
-        abrirVistaMensajeDesdeNotificacion_();
-      }
     });
   }
 }
@@ -3420,7 +2887,8 @@ function renderShoppingList_() {
 
 function sincronizarListaCompras_(payload) {
   const tokenAlEnviar = ++diarioLoadToken_;
-  callBackendBackground('guardarListaCompras', payload)
+  const body = Object.assign({ usuario: appState.activeUser || 'Brian' }, payload || {});
+  callBackendBackground('guardarListaCompras', body)
     .then(res => {
       if (
         res &&
@@ -3442,7 +2910,6 @@ function sincronizarListaCompras_(payload) {
 function openShoppingModal() {
   const modal = document.getElementById('shopping-modal');
   if (!modal) return;
-  cerrarBannerNotificacion(false);
   renderShoppingList_();
   modal.classList.add('active');
   pushModalHistory_('shopping-modal');
@@ -3528,14 +2995,6 @@ document.addEventListener('DOMContentLoaded', () => {
   resetAppScrollToTop_();
   window.addEventListener('load', resetAppScrollToTop_);
   window.addEventListener('pageshow', resetAppScrollToTop_);
-  try {
-    if (window.location && window.location.search && window.location.search.includes('openMsg=1')) {
-      pendingOpenQuickMsgFromNotif_ = true;
-      if (history && typeof history.replaceState === 'function') {
-        history.replaceState(null, '', window.location.pathname + (window.location.hash || ''));
-      }
-    }
-  } catch (e) {}
 
   cargarUsuarioYColorLocal_();
   if (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.persist === 'function') {
@@ -3547,9 +3006,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAndroidBackHistory_();
   autoFitCircleButtons();
   actualizarBadgeListaCompras_();
-  actualizarIndicadorMensajes_();
-  mostrarBannerMensajeSinLeerSiCorresponde_();
-  initNotificacionPolling_();
+  initAutoSyncRefresh_();
 
   const shoppingInput = document.getElementById('shopping-item-input');
   if (shoppingInput) {
@@ -3588,41 +3045,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         enviarMensajePareja();
-      }
-    });
-  }
-
-  const qrInput = document.getElementById('quick-reply-input');
-  if (qrInput) {
-    let qrBlurTimer = null;
-    qrInput.addEventListener('focus', () => {
-      if (qrBlurTimer) {
-        clearTimeout(qrBlurTimer);
-        qrBlurTimer = null;
-      }
-      const banner = document.getElementById('incoming-notif-banner');
-      if (banner && !banner.classList.contains('hidden')) {
-        banner.classList.add('reply-focused');
-      }
-      updateFloatingCircleButtonsPosition();
-      setTimeout(updateFloatingCircleButtonsPosition, 140);
-      setTimeout(updateFloatingCircleButtonsPosition, 300);
-    });
-    qrInput.addEventListener('blur', () => {
-      if (qrBlurTimer) clearTimeout(qrBlurTimer);
-      qrBlurTimer = setTimeout(() => {
-        qrBlurTimer = null;
-        const banner = document.getElementById('incoming-notif-banner');
-        if (banner && (!banner.classList.contains('expanded') || document.activeElement !== qrInput)) {
-          banner.classList.remove('reply-focused');
-        }
-        updateFloatingCircleButtonsPosition();
-      }, 220);
-    });
-    qrInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        enviarRespuestaRapidaInput();
       }
     });
   }

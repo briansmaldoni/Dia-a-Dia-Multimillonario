@@ -33,7 +33,11 @@ const SHEET_SCHEMAS = {
 
 function doPost(e) {
   try {
-    const body = JSON.parse(e.postData.contents);
+    const body = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
+    if (body && body.typeWebhook) {
+      procesarWebhookGreenApi_(body);
+      return HtmlService.createHtmlOutput('OK');
+    }
     const resultado = ejecutarAccion_(body.action, body.payload || {});
     return responderJSON_({ ok: true, data: resultado });
   } catch (err) {
@@ -59,13 +63,13 @@ function ejecutarAccion_(accion, payload) {
   switch (accion) {
     case 'getEstadoDiario': return getEstadoDiario_();
     case 'guardarMovimiento': return guardarMovimiento_(payload);
-    case 'eliminarMovimiento': return eliminarMovimiento_(payload.id);
+    case 'eliminarMovimiento': return eliminarMovimiento_(payload);
     case 'actualizarHB': return actualizarHB_(payload);
     case 'limpiarMovimientosPendientes': return limpiarMovimientosPendientes_();
     case 'resolverCierreDia': return resolverCierreDia_(payload);
     case 'actualizarConfig': return actualizarConfig_(payload);
     case 'enviarMensaje': return enviarMensaje_(payload);
-    case 'registrarPushSub': return registrarPushSub_(payload);
+    case 'enviarListaComprasWhatsApp': return enviarListaComprasWhatsApp_(payload);
     case 'guardarListaCompras': return guardarListaCompras_(payload);
     case 'diagnosticoConexion': return diagnosticoConexion_();
     default: throw new Error('Acción desconocida: ' + accion);
@@ -511,6 +515,9 @@ function getEstadoDiario_() {
   const movimientos = leerFilas_('Movimientos').map(limpiarFilaParaCliente_);
 
   const listaRaw = parseJsonConfig_(cfg.listaCompras);
+  const hasBrianWa = !!(String(cfg.greenApiId_Brian || '').trim() && String(cfg.greenApiToken_Brian || '').trim());
+  const hasVirginiaWa = !!(String(cfg.greenApiId_Virginia || '').trim() && String(cfg.greenApiToken_Virginia || '').trim());
+  const whatsappConfigured = !!(String(cfg.whatsappGroupId || '').trim() && (hasBrianWa || hasVirginiaWa));
 
   return {
     homeBankingTotal: getConfigNumero_(cfg, 'homeBankingTotal', 0),
@@ -520,10 +527,7 @@ function getEstadoDiario_() {
     diasRestantes: diasInfo.fechas,
     movimientos: movimientos,
     listaCompras: Array.isArray(listaRaw) ? listaRaw : [],
-    ultimaNotificacion: parseJsonConfig_(cfg.ultimaNotificacion),
-    ultimoMensaje: parseJsonConfig_(cfg.ultimoMensaje),
-    onesignalAppId: String(cfg.onesignalAppId || '').trim(),
-    pushConfigured: !!(String(cfg.onesignalAppId || '').trim() && String(cfg.onesignalApiKey || '').trim())
+    whatsappConfigured: whatsappConfigured
   };
 }
 
@@ -547,6 +551,7 @@ function guardarMovimiento_(data) {
   let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
   const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
+  const actorUsuario = (data.actorUsuario && String(data.actorUsuario).trim()) ? String(data.actorUsuario).trim() : usuario;
 
   const id = data.id || Utilities.getUuid();
   const filasMov = leerFilas_('Movimientos');
@@ -587,30 +592,39 @@ function guardarMovimiento_(data) {
   const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
   if (!actualizado) agregarFila_('Movimientos', obj);
 
-  if (!movExistente && !actualizado) {
-    const paraUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
-    const descLimpia = obj.descripcion || 'Gasto registrado';
+  if (!data.silencioso) {
+    const esEdicion = !!(movExistente || actualizado);
+    const descLimpia = obj.descripcion || (obj.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
     const montoTxt = formatearMonedaGS_(nuevoMonto);
-    const restoTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
-      ? (' · Queda para hoy: ' + String(data.disponibleHoyTexto).trim())
+    const extras = [];
+    if (obj.tipo === 'divisible' && fechas.length > 1) {
+      extras.push('en ' + fechas.length + ' días · ' + formatearMonedaGS_(obj.montoPorFecha) + '/día');
+    }
+    if (nuevoFromBag) {
+      extras.push('desde ahorros');
+    }
+    const extraTxt = extras.length ? (' (' + extras.join(', ') + ')') : '';
+    const antesTxt = (esEdicion && movExistente && Number(movExistente.monto) !== nuevoMonto)
+      ? (' (antes ' + formatearMonedaGS_(movExistente.monto) + ')')
       : '';
-    const notif = {
-      id: 'ntf_' + Utilities.getUuid(),
-      tipo: 'gasto',
-      de: usuario,
-      para: paraUsuario,
-      titulo: 'Tu amorcito registró un gasto en la aplicación',
-      cuerpo: descLimpia + ': ' + montoTxt + restoTxt,
-      creadoEn: new Date().toISOString()
-    };
-    setConfigValores_({ ultimaNotificacion: JSON.stringify(notif) });
-    enviarWebPushOneSignal_(cfg, paraUsuario, notif.titulo, notif.cuerpo, notif);
+    const dispTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
+      ? ('\n💰 Disponible para hoy: *' + String(data.disponibleHoyTexto).trim() + '*')
+      : '';
+    const encabezado = esEdicion ? '✏️ Amorcito, edité este gasto:' : '💸 Amorcito, registré este gasto:';
+    const mensajeWa = encabezado + '\n• *' + descLimpia + ':* ' + montoTxt + antesTxt + extraTxt + dispTxt;
+    enviarWhatsAppGreenApi_(cfg, actorUsuario, mensajeWa);
   }
 
   return obj;
 }
 
-function eliminarMovimiento_(id) {
+function eliminarMovimiento_(payload) {
+  const id = (payload && typeof payload === 'object') ? payload.id : payload;
+  if (!id) return false;
+  const usuarioPayload = (payload && typeof payload === 'object' && payload.usuario) ? String(payload.usuario).trim() : '';
+  const disponibleHoyTexto = (payload && typeof payload === 'object' && payload.disponibleHoyTexto) ? String(payload.disponibleHoyTexto).trim() : '';
+  const silencioso = !!(payload && typeof payload === 'object' && payload.silencioso);
+
   const filasMov = leerFilas_('Movimientos');
   const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
 
@@ -629,7 +643,17 @@ function eliminarMovimiento_(id) {
       bolsaTotal: bolsaTotal
     });
 
-    return borrarFilaPorId_('Movimientos', id);
+    const borrado = borrarFilaPorId_('Movimientos', id);
+    if (borrado && !silencioso) {
+      const actorUsuario = usuarioPayload || movExistente.usuario || cfg.usuarioDefault || 'Brian';
+      const descLimpia = movExistente.descripcion || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
+      const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
+      const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
+      const dispTxt = disponibleHoyTexto ? ('\n💰 Disponible para hoy: *' + disponibleHoyTexto + '*') : '';
+      const mensajeWa = '🗑️ Amorcito, eliminé este gasto:\n• *' + descLimpia + ':* ' + montoTxt + bolsaTxt + dispTxt;
+      enviarWhatsAppGreenApi_(cfg, actorUsuario, mensajeWa);
+    }
+    return borrado;
   }
   return false;
 }
@@ -736,118 +760,225 @@ function formatearMonedaGS_(n) {
   return sign + absStr;
 }
 
-function enviarMensaje_(payload) {
-  const texto = String((payload && payload.texto) || '').trim();
-  if (!texto) throw new Error('Escribí un mensaje antes de enviar');
-
-  const cfg = leerConfig_();
-  const deUsuario = (payload.de && String(payload.de).trim()) || (cfg.usuarioDefault || 'Brian');
-  const paraUsuario = (payload.para && String(payload.para).trim()) || (deUsuario === 'Virginia' ? 'Brian' : 'Virginia');
-
-  const notif = {
-    id: 'msg_' + Utilities.getUuid(),
-    tipo: 'mensaje',
-    de: deUsuario,
-    para: paraUsuario,
-    titulo: '💌 Mensaje de ' + deUsuario,
-    cuerpo: texto.slice(0, 240),
-    creadoEn: new Date().toISOString()
+function getGreenApiCreds_(cfg, usuario) {
+  const user = String(usuario || '').trim() === 'Virginia' ? 'Virginia' : 'Brian';
+  const rawUrl = String((cfg && cfg['greenApiUrl_' + user]) || '').trim().replace(/\/+$/, '');
+  return {
+    usuario: user,
+    apiUrl: rawUrl || 'https://api.green-api.com',
+    idInstance: String((cfg && cfg['greenApiId_' + user]) || '').trim(),
+    apiToken: String((cfg && cfg['greenApiToken_' + user]) || '').trim()
   };
-
-  const jsonNotif = JSON.stringify(notif);
-  setConfigValores_({
-    ultimaNotificacion: jsonNotif,
-    ultimoMensaje: jsonNotif
-  });
-
-  const pushResult = enviarWebPushOneSignal_(cfg, paraUsuario, notif.titulo, notif.cuerpo, notif);
-  return { notif: notif, push: pushResult };
 }
 
-function registrarPushSub_(payload) {
-  const usuario = String((payload && payload.usuario) || '').trim();
-  const subscriptionId = String((payload && payload.subscriptionId) || '').trim();
-  if (usuario !== 'Brian' && usuario !== 'Virginia') throw new Error('Usuario inválido');
-  if (!subscriptionId) throw new Error('subscriptionId requerido');
+function enviarWhatsAppGreenApi_(cfg, deUsuario, mensaje) {
+  const chatId = String((cfg && cfg.whatsappGroupId) || '').trim();
+  const creds = getGreenApiCreds_(cfg, deUsuario);
+  const texto = String(mensaje || '').trim();
 
-  const cfg = leerConfig_();
-  const parseList = (raw) => String(raw || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  const key = 'pushSub_' + usuario;
-  const otroUsuario = usuario === 'Virginia' ? 'Brian' : 'Virginia';
-  const otroKey = 'pushSub_' + otroUsuario;
-
-  const nextList = [subscriptionId].concat(parseList(cfg[key]).filter(id => id !== subscriptionId)).slice(0, 3);
-  const otroList = parseList(cfg[otroKey]).filter(id => id !== subscriptionId);
-
-  setConfigValores_({
-    [key]: nextList.join(','),
-    [otroKey]: otroList.join(',')
-  });
-  return { ok: true, key: key, subscriptionId: subscriptionId, subscriptionIds: nextList };
-}
-
-function enviarWebPushOneSignal_(cfg, paraUsuario, titulo, cuerpo, dataExtra) {
-  const appId = String((cfg && cfg.onesignalAppId) || '').trim();
-  const apiKey = String((cfg && cfg.onesignalApiKey) || '').trim();
-  if (!appId || !apiKey) {
-    return { sent: false, reason: 'missing_onesignal_config' };
+  if (!chatId || !creds.idInstance || !creds.apiToken || !texto) {
+    return { sent: false, reason: 'missing_greenapi_config', usuario: creds.usuario };
   }
 
   try {
-    const subIds = String(cfg['pushSub_' + paraUsuario] || '')
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const endpoint = creds.apiUrl +
+      '/waInstance' + encodeURIComponent(creds.idInstance) +
+      '/sendMessage/' + encodeURIComponent(creds.apiToken);
 
-    const targetUrl = (dataExtra && dataExtra.tipo === 'mensaje')
-      ? 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/?openMsg=1'
-      : 'https://briansmaldoni.github.io/Dia-a-Dia-Multimillonario/';
-
-    const basePayload = {
-      app_id: appId,
-      headings: { en: titulo, es: titulo },
-      contents: { en: cuerpo, es: cuerpo },
-      data: dataExtra || {},
-      url: targetUrl,
-      priority: 10,
-      ttl: 86400
-    };
-
-    const postOneSignal = (payloadObj) => UrlFetchApp.fetch('https://api.onesignal.com/notifications', {
+    const res = UrlFetchApp.fetch(endpoint, {
       method: 'post',
       contentType: 'application/json',
-      headers: {
-        Authorization: 'Key ' + apiKey
-      },
-      payload: JSON.stringify(payloadObj),
+      payload: JSON.stringify({ chatId: chatId, message: texto }),
       muteHttpExceptions: true
     });
 
-    let res = null;
-    let parsed = null;
-    if (subIds.length > 0) {
-      res = postOneSignal(Object.assign({}, basePayload, {
-        include_subscription_ids: subIds
-      }));
-      try { parsed = JSON.parse(res.getContentText()); } catch (_) { parsed = null; }
-    }
-
-    const noSubDelivered = !res || !parsed || !parsed.id || parsed.recipients === 0 || (Array.isArray(parsed.errors) && parsed.errors.length > 0);
-    if (noSubDelivered) {
-      res = postOneSignal(Object.assign({}, basePayload, {
-        include_aliases: { external_id: [paraUsuario] },
-        target_channel: 'push'
-      }));
-    }
-
-    return { sent: true, status: res.getResponseCode(), response: res.getContentText() };
+    const status = res.getResponseCode();
+    const bodyText = res.getContentText();
+    return {
+      sent: status >= 200 && status < 300,
+      status: status,
+      usuario: creds.usuario,
+      response: bodyText
+    };
   } catch (e) {
-    return { sent: false, error: String(e) };
+    return { sent: false, usuario: creds.usuario, error: String(e) };
   }
+}
+
+function listarGruposWhatsApp(usuario) {
+  const cfg = leerConfig_(true);
+  let creds = getGreenApiCreds_(cfg, usuario || 'Brian');
+  if ((!creds.idInstance || !creds.apiToken) && !usuario) {
+    const alt = getGreenApiCreds_(cfg, 'Virginia');
+    if (alt.idInstance && alt.apiToken) creds = alt;
+  }
+  if (!creds.idInstance || !creds.apiToken) {
+    Logger.log('Faltan credenciales greenApiId_' + creds.usuario + ' o greenApiToken_' + creds.usuario + ' en Config.');
+    return [];
+  }
+
+  try {
+    const endpoint = creds.apiUrl +
+      '/waInstance' + encodeURIComponent(creds.idInstance) +
+      '/getChats/' + encodeURIComponent(creds.apiToken);
+    const res = UrlFetchApp.fetch(endpoint, { method: 'get', muteHttpExceptions: true });
+    const status = res.getResponseCode();
+    const bodyText = res.getContentText();
+    if (status < 200 || status >= 300) {
+      Logger.log('Error getChats (' + status + '): ' + bodyText);
+      return [];
+    }
+    const chats = JSON.parse(bodyText);
+    const grupos = (Array.isArray(chats) ? chats : [])
+      .filter(c => c && (c.type === 'group' || String(c.id || '').endsWith('@g.us')))
+      .map(c => ({ name: String(c.name || 'Grupo sin nombre'), id: String(c.id || '').trim() }));
+    grupos.forEach(g => Logger.log(g.name + ' -> ' + g.id));
+    return grupos;
+  } catch (e) {
+    Logger.log('Error listando grupos WhatsApp: ' + String(e));
+    return [];
+  }
+}
+
+function probarWhatsAppBrian() {
+  const res = enviarWhatsAppGreenApi_(leerConfig_(true), 'Brian', '✅ Prueba de conexión desde Dia a Dia Multimillonarios!');
+  Logger.log(JSON.stringify(res));
+  return res;
+}
+
+function probarWhatsAppVirginia() {
+  const res = enviarWhatsAppGreenApi_(leerConfig_(true), 'Virginia', '✅ Prueba de conexión desde Dia a Dia Multimillonarios!');
+  Logger.log(JSON.stringify(res));
+  return res;
+}
+
+const WA_PRESET_MESSAGES = [
+  'Te amo mucho ❤️',
+  'Ya actualicé la aplicación, te amo mucho ❤️'
+];
+
+function enviarMensaje_(payload) {
+  const texto = String((payload && payload.texto) || '').trim().slice(0, 500);
+  if (!texto) throw new Error('Escribí un mensaje antes de enviar');
+
+  const cfg = leerConfig_();
+  const deUsuario = (payload && payload.de && String(payload.de).trim()) || (cfg.usuarioDefault || 'Brian');
+  const waResult = enviarWhatsAppGreenApi_(cfg, deUsuario, texto);
+  return { ok: true, de: deUsuario, texto: texto, whatsapp: waResult };
+}
+
+function formatearListaComprasWhatsApp_(cfg) {
+  const parsed = parseJsonConfig_(cfg && cfg.listaCompras);
+  const lista = Array.isArray(parsed)
+    ? parsed.map(normalizarItemListaCompras_).filter(Boolean)
+    : [];
+  const pendientes = lista.filter(it => !it.done);
+  const comprados = lista.filter(it => it.done);
+
+  if (!pendientes.length) {
+    if (comprados.length > 0) {
+      return '🛒 *Lista de compras actual:*\n¡No hay productos pendientes! ✨\n\n✅ _Tachados (' + comprados.length + '): ' + comprados.map(i => i.texto).join(', ') + '_';
+    }
+    return '🛒 *Lista de compras actual:*\nNo hay productos pendientes ✨';
+  }
+
+  let texto = '🛒 *Lista de compras actual* (' + pendientes.length + (pendientes.length === 1 ? ' pendiente' : ' pendientes') + '):\n' +
+    pendientes.map(i => '• ' + i.texto).join('\n');
+  if (comprados.length > 0) {
+    texto += '\n\n✅ _Tachados (' + comprados.length + '): ' + comprados.map(i => i.texto).join(', ') + '_';
+  }
+  return texto;
+}
+
+function construirMenuWhatsApp_() {
+  return [
+    '📋 *Menú — Día a Día Multimillonarios*',
+    '',
+    'Respondé con un número (o escribí *lista* en cualquier momento):',
+    '1️⃣ Consultar lista de compras actual 🛒',
+    '2️⃣ ' + WA_PRESET_MESSAGES[0],
+    '3️⃣ ' + WA_PRESET_MESSAGES[1]
+  ].join('\n');
+}
+
+function enviarListaComprasWhatsApp_(payload) {
+  const cfg = leerConfig_(true);
+  const deUsuario = (payload && payload.de && String(payload.de).trim()) || (cfg.usuarioDefault || 'Brian');
+  const texto = formatearListaComprasWhatsApp_(cfg);
+  const waResult = enviarWhatsAppGreenApi_(cfg, deUsuario, texto);
+  return { ok: true, de: deUsuario, texto: texto, whatsapp: waResult };
+}
+
+function procesarWebhookGreenApi_(body) {
+  const tipo = String((body && body.typeWebhook) || '').trim();
+  if (tipo !== 'outgoingMessageReceived' && tipo !== 'incomingMessageReceived') {
+    return { handled: false, reason: 'ignored_type' };
+  }
+
+  const cfg = leerConfig_(true);
+  const groupId = String((cfg && cfg.whatsappGroupId) || '').trim();
+  const chatId = String((body && body.senderData && body.senderData.chatId) || '').trim();
+  if (!groupId || chatId !== groupId) {
+    return { handled: false, reason: 'ignored_chat' };
+  }
+
+  const idMsg = String((body && body.idMessage) || '').trim();
+  const cache = CacheService.getScriptCache();
+  if (idMsg) {
+    const dedupKey = 'wa_msg_' + idMsg;
+    if (cache.get(dedupKey)) return { handled: false, reason: 'duplicate' };
+    cache.put(dedupKey, '1', 120);
+  }
+
+  const msgData = (body && body.messageData) || {};
+  const rawText = String(
+    (msgData.textMessageData && msgData.textMessageData.textMessage) ||
+    (msgData.extendedTextMessageData && msgData.extendedTextMessageData.text) ||
+    ''
+  ).trim();
+  if (!rawText) return { handled: false, reason: 'empty_text' };
+
+  const cmd = rawText
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+  const menuKey = 'wa_menu_activo_' + chatId;
+  const menuActivo = !!cache.get(menuKey);
+  let respuesta = '';
+
+  if (cmd === 'menu' || cmd === '/menu' || cmd === '!menu' || cmd === 'ayuda' || cmd === '?') {
+    respuesta = construirMenuWhatsApp_();
+    cache.put(menuKey, '1', 300);
+  } else if (
+    cmd === 'lista' ||
+    cmd === '/lista' ||
+    cmd === '!lista' ||
+    cmd === 'compras' ||
+    cmd === 'lista de compras' ||
+    cmd === '/1' ||
+    (menuActivo && cmd === '1')
+  ) {
+    respuesta = formatearListaComprasWhatsApp_(cfg);
+  } else if (cmd === '/2' || (menuActivo && cmd === '2')) {
+    respuesta = WA_PRESET_MESSAGES[0];
+  } else if (cmd === '/3' || (menuActivo && cmd === '3')) {
+    respuesta = WA_PRESET_MESSAGES[1];
+  } else {
+    return { handled: false, reason: 'not_a_command' };
+  }
+
+  const idInst = String((body && body.instanceData && body.instanceData.idInstance) || '').trim();
+  const instanciaUser = (idInst && String(cfg.greenApiId_Virginia || '').trim() === idInst) ? 'Virginia' : 'Brian';
+  const actorUsuario = tipo === 'outgoingMessageReceived'
+    ? instanciaUser
+    : (instanciaUser === 'Virginia' ? 'Brian' : 'Virginia');
+  const actorCreds = getGreenApiCreds_(cfg, actorUsuario);
+  const usuarioEnvio = (actorCreds.idInstance && actorCreds.apiToken) ? actorUsuario : instanciaUser;
+
+  const waResult = enviarWhatsAppGreenApi_(cfg, usuarioEnvio, respuesta);
+  return { handled: true, command: cmd, usuario: usuarioEnvio, whatsapp: waResult };
 }
 
 function normalizarItemListaCompras_(it) {
@@ -865,35 +996,67 @@ function normalizarItemListaCompras_(it) {
 }
 
 function guardarListaCompras_(payload) {
+  let lista = [];
+  let waMensaje = '';
+  let waUsuario = 'Brian';
+  let cfgSnapshot = null;
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     invalidarCacheSheet_('Config');
     const cfg = leerConfig_(true);
+    cfgSnapshot = cfg;
     const parsed = parseJsonConfig_(cfg.listaCompras);
-    let lista = Array.isArray(parsed)
+    lista = Array.isArray(parsed)
       ? parsed.map(normalizarItemListaCompras_).filter(Boolean)
       : [];
+
+    waUsuario = String(
+      (payload && payload.usuario) ||
+      (payload && payload.item && payload.item.autor) ||
+      cfg.usuarioDefault ||
+      'Brian'
+    ).trim();
 
     const op = String((payload && payload.op) || '').trim();
     if (op === 'add' && payload.item) {
       const nuevo = normalizarItemListaCompras_(payload.item);
       if (nuevo) {
         const idx = lista.findIndex(x => String(x.id) === nuevo.id);
-        if (idx >= 0) lista[idx] = nuevo;
-        else lista.unshift(nuevo);
+        if (idx >= 0) {
+          lista[idx] = nuevo;
+        } else {
+          lista.unshift(nuevo);
+          if (!nuevo.done) {
+            waMensaje = '🛒 Amorcito, agregué a la lista de compras:\n- ' + nuevo.texto;
+          }
+        }
       }
     } else if (op === 'toggle' && payload.id) {
       const targetId = String(payload.id).trim();
       const idx = lista.findIndex(x => String(x.id) === targetId);
       if (idx >= 0) {
-        lista[idx].done = payload.done !== undefined ? !!payload.done : !lista[idx].done;
+        const estabaHecho = !!lista[idx].done;
+        const nuevoHecho = payload.done !== undefined ? !!payload.done : !estabaHecho;
+        lista[idx].done = nuevoHecho;
+        if (nuevoHecho !== estabaHecho) {
+          waMensaje = nuevoHecho
+            ? ('✅ Amorcito, taché de la lista de compras:\n- ' + lista[idx].texto)
+            : ('🛒 Amorcito, volví a agregar a la lista de compras:\n- ' + lista[idx].texto);
+        }
       } else if (Array.isArray(payload.items)) {
         lista = payload.items.map(normalizarItemListaCompras_).filter(Boolean);
       }
     } else if (op === 'delete' && payload.id) {
       const targetId = String(payload.id).trim();
-      lista = lista.filter(x => String(x.id) !== targetId);
+      const idx = lista.findIndex(x => String(x.id) === targetId);
+      if (idx >= 0) {
+        if (!lista[idx].done) {
+          waMensaje = '🛒 Amorcito, quité de la lista de compras:\n- ' + lista[idx].texto;
+        }
+        lista.splice(idx, 1);
+      }
     } else if (op === 'clearDone') {
       lista = lista.filter(x => !x.done);
     } else if (Array.isArray(payload && payload.items)) {
@@ -902,10 +1065,16 @@ function guardarListaCompras_(payload) {
 
     if (lista.length > 150) lista = lista.slice(0, 150);
     escribirConfigSinLock_({ listaCompras: JSON.stringify(lista) });
-    return { ok: true, listaCompras: lista };
   } finally {
     lock.releaseLock();
   }
+
+  let waResult = null;
+  if (waMensaje && cfgSnapshot) {
+    waResult = enviarWhatsAppGreenApi_(cfgSnapshot, waUsuario, waMensaje);
+  }
+
+  return { ok: true, listaCompras: lista, whatsapp: waResult };
 }
 
 // ============================================================
@@ -915,37 +1084,34 @@ function guardarListaCompras_(payload) {
 function setupSheets() {
   Object.keys(SHEET_SCHEMAS).forEach(nombre => {
     asegurarCabeceras_(nombre);
+    const schema = SHEET_SCHEMAS[nombre];
+    const sheet = getSheet_(nombre, true);
+    const filasFmt = Math.min(Math.max(sheet.getMaxRows() - 1, 1), 998);
+    schema.columns.forEach((col, idx) => {
+      const tipo = schema.types[col];
+      if (tipo === 'string' || tipo === 'json') {
+        sheet.getRange(2, idx + 1, filasFmt, 1).setNumberFormat('@');
+      }
+    });
   });
 
-  const cfg = leerConfig_();
+  const cfg = leerConfig_(true);
   setConfigValores_({
     homeBankingTotal: cfg.homeBankingTotal || '0',
     bolsaTotal: cfg.bolsaTotal || '0',
     lastProcessedDate: cfg.lastProcessedDate || formatearFechaISO_(new Date()),
-    onesignalAppId: cfg.onesignalAppId || '',
-    onesignalApiKey: cfg.onesignalApiKey || ''
+    whatsappGroupId: cfg.whatsappGroupId || '',
+    greenApiUrl_Brian: cfg.greenApiUrl_Brian || 'https://api.green-api.com',
+    greenApiId_Brian: cfg.greenApiId_Brian || '',
+    greenApiToken_Brian: cfg.greenApiToken_Brian || '',
+    greenApiUrl_Virginia: cfg.greenApiUrl_Virginia || 'https://api.green-api.com',
+    greenApiId_Virginia: cfg.greenApiId_Virginia || '',
+    greenApiToken_Virginia: cfg.greenApiToken_Virginia || ''
   });
 
   limpiarConfigLegacy_();
 
-  Logger.log('Setup completo. Pestañas creadas y aseguradas: ' + Object.keys(SHEET_SCHEMAS).join(', '));
-}
-
-function repararSheetsExistentes() {
-  Object.keys(SHEET_SCHEMAS).forEach(nombre => {
-    asegurarCabeceras_(nombre);
-    const schema = SHEET_SCHEMAS[nombre];
-    const sheet = getSheet_(nombre, true);
-    schema.columns.forEach((col, idx) => {
-      const tipo = schema.types[col];
-      if (tipo === 'string' || tipo === 'json') {
-        sheet.getRange(2, idx + 1, 998, 1).setNumberFormat('@');
-      }
-    });
-  });
-  setConfigValores_({ lastProcessedDate: formatearFechaISO_(new Date()) });
-  limpiarConfigLegacy_();
-  Logger.log('Formatos de texto aplicados, cabeceras aseguradas y configuración legacy depurada.');
+  Logger.log('Setup y reparación completa. Pestañas y formatos asegurados: ' + Object.keys(SHEET_SCHEMAS).join(', '));
 }
 
 function limpiarConfigLegacy_() {
@@ -953,7 +1119,16 @@ function limpiarConfigLegacy_() {
   if (!sheet) return;
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) return;
-  const legacyKeys = ['accentColorBrian', 'accentColorVirginia'];
+  const legacyKeys = [
+    'accentColorBrian',
+    'accentColorVirginia',
+    'onesignalAppId',
+    'onesignalApiKey',
+    'pushSub_Brian',
+    'pushSub_Virginia',
+    'ultimaNotificacion',
+    'ultimoMensaje'
+  ];
   for (let i = values.length - 1; i >= 1; i--) {
     const key = String(values[i][0] || '').trim();
     if (legacyKeys.includes(key)) {

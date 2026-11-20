@@ -52,8 +52,6 @@
   <!-- Tailwind CSS CDN para utilidades de maquetación -->
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="styles.css">
-  <!-- OneSignal Web Push SDK v16 -->
-  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
 </head>
 
 <body class="min-h-screen flex justify-center items-start sm:items-center p-0 sm:p-4">
@@ -70,36 +68,6 @@
   <div id="sync-toast" class="sync-toast flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold">
     <span class="sync-spinner"></span>
     <span id="sync-text">Sincronizando con base de datos...</span>
-  </div>
-
-  <!-- Banner flotante de mensaje / gasto entrante -->
-  <div id="incoming-notif-banner" onclick="alTocarBannerNotificacion(event)" class="incoming-notif-banner hidden" role="status" aria-live="polite">
-    <div class="flex items-start justify-between gap-2 w-full">
-      <div id="incoming-notif-main" class="flex items-start gap-2.5 flex-1 min-w-0">
-        <span id="incoming-notif-icon" class="text-lg leading-none shrink-0 mt-0.5">💌</span>
-        <div class="min-w-0 flex-1">
-          <p id="incoming-notif-title" class="text-[11px] font-extrabold text-zinc-900 truncate"></p>
-          <p id="incoming-notif-body" class="text-xs font-medium text-zinc-700 leading-snug break-words mt-0.5"></p>
-          <p id="incoming-notif-hint" class="text-[10px] font-bold text-rose-500 mt-1 hidden">Tocá para responder rápido</p>
-        </div>
-      </div>
-      <button type="button" onclick="event.stopPropagation(); cerrarBannerNotificacion(true)" class="text-zinc-400 hover:text-zinc-700 text-xs font-bold px-2 py-1 -mr-1 -mt-0.5 shrink-0" aria-label="Cerrar notificación">✕</button>
-    </div>
-
-    <div id="incoming-notif-reply-panel" onclick="event.stopPropagation()" class="hidden pt-2.5 mt-2 border-t border-zinc-200/80 space-y-2">
-      <button id="btn-quick-reply-love" type="button" onclick="enviarRespuestaRapidaBanner('Te amo mucho ❤️')"
-        class="w-full py-2 px-3 rounded-xl theme-bg-primary text-white text-xs font-bold shadow-sm hover:opacity-90 active:scale-[0.99] transition-all">
-        ❤️ Responder "Te amo mucho"
-      </button>
-      <div class="flex items-center gap-1.5">
-        <input id="quick-reply-input" type="text" maxlength="240" placeholder="Escribir respuesta..."
-          class="flex-1 min-w-0 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-base text-zinc-900 placeholder-zinc-400 focus:outline-none focus:bg-white focus:border-zinc-400">
-        <button id="btn-quick-reply-send" type="button" onclick="enviarRespuestaRapidaInput()"
-          class="shrink-0 px-3.5 py-2 rounded-xl theme-bg-primary text-white text-xs font-bold shadow-sm hover:opacity-90">
-          Enviar
-        </button>
-      </div>
-    </div>
   </div>
 
   <!-- Contenedor Principal (Marco Móvil de 412px según Figma) -->
@@ -126,9 +94,8 @@
             <span aria-hidden="true">🛒</span>
             <span id="shopping-pending-badge" class="shopping-pending-badge hidden">0</span>
           </button>
-          <button id="btn-open-msg-modal" type="button" onclick="openMessageModal()" class="msg-header-btn" title="Mensajes y notificaciones" aria-label="Mensajes para tu pareja">
+          <button id="btn-open-msg-modal" type="button" onclick="openMessageModal()" class="msg-header-btn" title="Enviar mensajito al grupo de WhatsApp" aria-label="Enviar mensajito al grupo de WhatsApp">
             <span aria-hidden="true">💌</span>
-            <span id="msg-unread-dot" class="msg-unread-dot hidden"></span>
           </button>
           <button id="user-btn-brian" type="button" data-user="Brian" class="avatar-btn active" title="Brian (mantené presionado para elegir paleta)">
             B
@@ -503,24 +470,15 @@
     </div>
   </div>
 
-  <!-- MODAL: Mensajes y Notificaciones entre Pareja -->
+  <!-- MODAL: Mensajes al Grupo de WhatsApp -->
   <div id="message-modal" class="modal-overlay" onclick="if (event.target === this) closeMessageModal()">
     <div id="message-modal-card" class="bg-white w-[92%] max-w-sm rounded-3xl p-5 shadow-2xl space-y-3.5 max-h-[88vh] overflow-y-auto no-scrollbar">
       <div class="flex justify-between items-start gap-2">
         <div>
           <h3 id="msg-modal-title" class="font-bold text-base text-zinc-900">💌 Enviar mensajito</h3>
-          <p id="msg-modal-subtitle" class="text-[11px] text-zinc-500 mt-0.5">Le llega al teléfono de tu pareja al instante</p>
+          <p id="msg-modal-subtitle" class="text-[11px] text-zinc-500 mt-0.5">Se envía directo al grupo de WhatsApp con tu nombre</p>
         </div>
         <button type="button" onclick="closeMessageModal()" class="text-zinc-400 hover:text-zinc-700 font-bold text-base px-1" aria-label="Cerrar mensajes">✕</button>
-      </div>
-
-      <!-- Último mensaje recibido -->
-      <div id="msg-received-box" class="hidden rounded-2xl p-3 border border-rose-200 bg-rose-50/70 space-y-1">
-        <div class="flex items-center justify-between gap-2">
-          <span id="msg-received-from" class="text-[10px] font-extrabold uppercase tracking-wider text-rose-700"></span>
-          <span id="msg-received-time" class="text-[10px] text-zinc-400 font-medium"></span>
-        </div>
-        <p id="msg-received-text" class="text-xs font-semibold text-zinc-800 leading-snug break-words"></p>
       </div>
 
       <!-- Mensajes predeterminados -->
@@ -542,14 +500,10 @@
             Enviar
           </button>
         </div>
-        <div class="preset-msg-card">
-          <button type="button" onclick="seleccionarMensajeRapido(2)" class="flex-1 text-left text-xs font-semibold text-zinc-800 pr-1">
-            Revisá la lista de compras 🛒❤️
-          </button>
-          <button type="button" onclick="enviarMensajeRapido(2)" class="shrink-0 px-3 py-1.5 rounded-full theme-bg-primary text-white text-[11px] font-bold shadow-sm hover:opacity-90">
-            Enviar
-          </button>
-        </div>
+        <button id="btn-send-shopping-wa" type="button" onclick="enviarListaComprasWhatsApp()"
+          class="w-full py-2.5 px-3 rounded-2xl border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-zinc-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors">
+          🛒 Consultar / enviar lista de compras actual
+        </button>
       </div>
 
       <!-- Emojis básicos -->
@@ -573,23 +527,12 @@
 
       <!-- Mensaje personalizado -->
       <div class="space-y-2">
-        <textarea id="msg-custom-input" rows="2" maxlength="240"
+        <textarea id="msg-custom-input" rows="2" maxlength="500"
           placeholder="Escribí un mensajito personalizado..."
           class="w-full rounded-2xl border border-zinc-200 px-3.5 py-2.5 text-base text-zinc-800 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-300 resize-none"></textarea>
         <button id="btn-send-msg" type="button" onclick="enviarMensajePareja()"
           class="w-full py-3 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90 transition-opacity">
-          Enviar mensaje 💌
-        </button>
-      </div>
-
-      <!-- Activación de notificaciones en el teléfono -->
-      <div class="pt-2 border-t border-zinc-100 space-y-2">
-        <p id="msg-notif-status" class="text-[11px] font-semibold text-zinc-500 text-center">
-          Estado de notificaciones: verificando...
-        </p>
-        <button id="btn-enable-notifications" type="button" onclick="activarNotificacionesDispositivo()"
-          class="w-full py-2.5 px-3 rounded-full bg-zinc-100 text-zinc-800 border border-zinc-200 font-bold text-xs hover:bg-zinc-200 transition-colors">
-          🔔 Activar notificaciones en este teléfono
+          Enviar a WhatsApp 💌
         </button>
       </div>
     </div>
