@@ -1,4 +1,4 @@
-const CACHE_NAME = 'multimillonarios-cache-v49';
+const CACHE_NAME = 'multimillonarios-cache-v50';
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -7,6 +7,8 @@ self.addEventListener('install', e => {
         './',
         './index.html',
         './app.js',
+        './theme-boot.js',
+        './tailwind.min.css',
         './styles.css',
         './manifest.json',
         './icon-192.png',
@@ -25,15 +27,30 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+
+  let url = null;
+  try {
+    url = new URL(e.request.url);
+  } catch (err) {
+    return;
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
   if (
-    e.request.method !== 'GET' ||
-    e.request.url.includes('script.google.com') ||
-    e.request.url.includes('assetlinks.json')
-  ) return;
+    url.hostname === 'script.google.com' ||
+    url.hostname === 'script.googleusercontent.com' ||
+    url.pathname.endsWith('assetlinks.json')
+  ) {
+    return;
+  }
+
+  const isSameOrigin = url.origin === self.location.origin;
+
   e.respondWith(
     fetch(e.request)
       .then(res => {
-        if (res && res.ok && (res.type === 'basic' || res.type === 'cors')) {
+        if (isSameOrigin && res && res.ok && res.type === 'basic') {
           const copy = res.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(e.request, copy)).catch(() => {});
         }

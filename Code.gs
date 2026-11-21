@@ -31,28 +31,141 @@ const SHEET_SCHEMAS = {
 // 2. ENTRY POINTS Y ROUTER
 // ============================================================
 
-function doPost(e) {
-  try {
-    const body = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
-    if (body && body.typeWebhook) {
-      procesarWebhookGreenApi_(body);
-      return HtmlService.createHtmlOutput('OK');
+const MAX_BODY_CHARS_ = 65536;
+const MAX_MONEY_VALUE_ = 1e12;
+const ALLOWED_USERS_ = { Brian: 'Brian', Virginia: 'Virginia' };
+const GREEN_API_URL_REGEX_ = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+green-?api\.com$/i;
+const ALLOWED_CONFIG_KEYS_ = {
+  homeBankingTotal: true,
+  bolsaTotal: true,
+  lastProcessedDate: true,
+  diasExcluidos: true,
+  listaCompras: true,
+  whatsappGroupId: true,
+  greenApiUrl_Brian: true,
+  greenApiId_Brian: true,
+  greenApiUrl_Virginia: true,
+  greenApiId_Virginia: true,
+  usuarioDefault: true
+};
+
+function crearErrorApp_(code, message) {
+  const err = new Error(message || 'Error en la solicitud');
+  err.appCode = code || 'VALIDATION_ERROR';
+  err.isPublic = true;
+  return err;
+}
+
+function redactarSecretosTexto_(str) {
+  return String(str || '').replace(/\/(sendMessage|getChats)\/[^/\s"']+/gi, '/$1/[REDACTED]');
+}
+
+function constantTimeEquals_(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
+  const da = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, a, Utilities.Charset.UTF_8);
+  const db = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, b, Utilities.Charset.UTF_8);
+  if (!da || !db || da.length !== db.length) return false;
+  let diff = 0;
+  for (let i = 0; i < da.length; i++) {
+    diff |= (da[i] ^ db[i]);
+  }
+  return diff === 0;
+}
+
+function generarTokenSeguro_(len = 32) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let out = '';
+  let round = 0;
+  while (out.length < len) {
+    round++;
+    const seed = Utilities.getUuid() + '|' + Date.now() + '|' + round;
+    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, seed, Utilities.Charset.UTF_8);
+    for (let i = 0; i < digest.length && out.length < len; i++) {
+      out += alphabet[(digest[i] & 0xff) % alphabet.length];
     }
-    const resultado = ejecutarAccion_(body.action, body.payload || {});
-    return responderJSON_({ ok: true, data: resultado });
-  } catch (err) {
-    return responderJSON_({ ok: false, error: err.message });
+  }
+  return out;
+}
+
+function getScriptProp_(key) {
+  try {
+    return String(PropertiesService.getScriptProperties().getProperty(key) || '').trim();
+  } catch (e) {
+    return '';
   }
 }
 
-function doGet(e) {
+function validarAccesoApi_(body) {
+  const expected = getScriptProp_('APP_ACCESS_KEY');
+  if (expected.length < 16) {
+    throw crearErrorApp_('AUTH_NOT_CONFIGURED', 'Falta activar la clave de acceso en Apps Script (ejecutá generarClaveAcceso)');
+  }
+  const provided = (body && typeof body.accessKey === 'string') ? body.accessKey.trim() : '';
+  if (!provided || !constantTimeEquals_(provided, expected)) {
+    throw crearErrorApp_('UNAUTHORIZED', 'Clave de acceso inválida o faltante');
+  }
+}
+
+function validarWebhookSecret_(e) {
+  const expected = getScriptProp_('WEBHOOK_SECRET');
+  if (!expected) return true;
+  if (expected.length < 16) return false;
+  const arr = e && e.parameters && e.parameters.wh;
+  if (Array.isArray(arr)) {
+    if (arr.length !== 1) return false;
+    return constantTimeEquals_(String(arr[0] || '').trim(), expected);
+  }
+  const single = e && e.parameter && e.parameter.wh;
+  return constantTimeEquals_(String(single || '').trim(), expected);
+}
+
+function doPost(e) {
   try {
-    const payload = e.parameter.payload ? JSON.parse(e.parameter.payload) : {};
-    const resultado = ejecutarAccion_(e.parameter.action, payload);
+    const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
+    if (rawBody.length > MAX_BODY_CHARS_) {
+      throw crearErrorApp_('PAYLOAD_TOO_LARGE', 'La solicitud supera el tamaño máximo permitido');
+    }
+    let body = {};
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch (parseErr) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'Formato JSON inválido');
+      }
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'Cuerpo JSON inválido');
+    }
+
+    const hasWebhookParam = Boolean(e && ((e.parameter && e.parameter.wh !== undefined) || (e.parameters && e.parameters.wh !== undefined)));
+    if (body.typeWebhook !== undefined || hasWebhookParam) {
+      if (!validarWebhookSecret_(e)) {
+        return ContentService.createTextOutput('UNAUTHORIZED').setMimeType(ContentService.MimeType.TEXT);
+      }
+      if (body.typeWebhook) {
+        procesarWebhookGreenApi_(body);
+      }
+      return ContentService.createTextOutput('OK').setMimeType(ContentService.MimeType.TEXT);
+    }
+
+    validarAccesoApi_(body);
+    const resultado = ejecutarAccion_(body.action, body.payload || {});
     return responderJSON_({ ok: true, data: resultado });
   } catch (err) {
-    return responderJSON_({ ok: false, error: err.message });
+    if (err && err.isPublic) {
+      return responderJSON_({ ok: false, code: err.appCode || 'VALIDATION_ERROR', error: err.message });
+    }
+    const rawMsg = String((err && err.message) || err || '');
+    if (/lock|timeout/i.test(rawMsg)) {
+      return responderJSON_({ ok: false, code: 'LOCK_TIMEOUT', error: 'Servidor ocupado, reintentá en unos segundos' });
+    }
+    Logger.log('Error interno en doPost: ' + redactarSecretosTexto_(String((err && err.stack) || rawMsg)));
+    return responderJSON_({ ok: false, code: 'INTERNAL_ERROR', error: 'Error interno del servidor' });
   }
+}
+
+function doGet(_e) {
+  return responderJSON_({ ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Método no permitido' });
 }
 
 function responderJSON_(obj) {
@@ -66,12 +179,10 @@ function ejecutarAccion_(accion, payload) {
     case 'eliminarMovimiento': return eliminarMovimiento_(payload);
     case 'actualizarHB': return actualizarHB_(payload);
     case 'resolverCierreDia': return resolverCierreDia_(payload);
-    case 'actualizarConfig': return actualizarConfig_(payload);
     case 'enviarMensaje': return enviarMensaje_(payload);
     case 'enviarListaComprasWhatsApp': return enviarListaComprasWhatsApp_(payload);
     case 'guardarListaCompras': return guardarListaCompras_(payload);
-    case 'diagnosticoConexion': return diagnosticoConexion_();
-    default: throw new Error('Acción desconocida: ' + accion);
+    default: throw crearErrorApp_('UNKNOWN_ACTION', 'Acción no permitida');
   }
 }
 
@@ -246,6 +357,17 @@ function filaDesdeObjeto_(sheetName, obj) {
   });
 }
 
+function aplicarFormatoTextoColumnas_(sheet, sheetName, startRow, numRows) {
+  const schema = SHEET_SCHEMAS[sheetName];
+  if (!schema || !sheet || numRows < 1) return;
+  schema.columns.forEach((col, idx) => {
+    const tipo = schema.types[col];
+    if (tipo === 'string' || tipo === 'json') {
+      sheet.getRange(startRow, idx + 1, numRows, 1).setNumberFormat('@');
+    }
+  });
+}
+
 function agregarFila_(sheetName, obj) {
   const sheet = getSheet_(sheetName, true);
   const fila = filaDesdeObjeto_(sheetName, obj);
@@ -253,7 +375,13 @@ function agregarFila_(sheetName, obj) {
   if (maxCols < fila.length) {
     sheet.insertColumnsAfter(maxCols, fila.length - maxCols);
   }
-  sheet.appendRow(fila);
+  const nextRow = Math.max(sheet.getLastRow() + 1, 2);
+  const maxRows = sheet.getMaxRows();
+  if (maxRows < nextRow) {
+    sheet.insertRowsAfter(maxRows, nextRow - maxRows);
+  }
+  aplicarFormatoTextoColumnas_(sheet, sheetName, nextRow, 1);
+  sheet.getRange(nextRow, 1, 1, fila.length).setValues([fila]);
   invalidarCacheSheet_(sheetName);
 }
 
@@ -273,6 +401,7 @@ function actualizarFilaPorId_(sheetName, id, obj) {
       if (maxCols < fila.length) {
         sheet.insertColumnsAfter(maxCols, fila.length - maxCols);
       }
+      aplicarFormatoTextoColumnas_(sheet, sheetName, i + 1, 1);
       sheet.getRange(i + 1, 1, 1, fila.length).setValues([fila]);
       invalidarCacheSheet_(sheetName);
       return true;
@@ -318,8 +447,11 @@ function leerConfig_(forzarLectura = false) {
   if (!forzarLectura && _configCache) {
     return _configCache;
   }
-  const cfg = {};
-  leerFilas_('Config', forzarLectura).forEach(f => { cfg[f.clave] = f.valor; });
+  const cfg = Object.create(null);
+  leerFilas_('Config', forzarLectura).forEach(f => {
+    const clave = String(f.clave || '').trim();
+    if (clave) cfg[clave] = f.valor;
+  });
   _configCache = cfg;
   return cfg;
 }
@@ -328,7 +460,7 @@ function getConfigNumero_(cfg, clave, porDefecto) {
   const v = cfg[clave];
   if (v === undefined || v === null || v === '') return porDefecto;
   const n = Number(v);
-  return isNaN(n) ? porDefecto : n;
+  return Number.isFinite(n) ? n : porDefecto;
 }
 
 function escribirConfigSinLock_(cambios) {
@@ -340,8 +472,12 @@ function escribirConfigSinLock_(cambios) {
   const rows = values.slice(1).map(r => [r[0], r[1]]);
   const claves = rows.map(r => String(r[0] || '').trim());
 
-  keys.forEach(clave => {
-    const valor = String(cambios[clave]);
+  keys.forEach(rawClave => {
+    const clave = String(rawClave || '').trim();
+    if (!ALLOWED_CONFIG_KEYS_[clave]) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'Clave de configuración no permitida: ' + clave);
+    }
+    const valor = String(cambios[rawClave]);
     const idx = claves.indexOf(clave);
     if (idx !== -1) {
       rows[idx][1] = valor;
@@ -511,6 +647,45 @@ function calcularDiasRestantes_(desde, feriadosExtra) {
 // 6. MÓDULO DIARIO
 // ============================================================
 
+function esIdSeguro_(id) {
+  return /^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$/.test(String(id || '').trim());
+}
+
+function normalizarUsuarioPermitido_(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    const fb = String(fallback || '').trim();
+    return ALLOWED_USERS_[fb] || 'Brian';
+  }
+  const clean = String(raw).trim();
+  if (!ALLOWED_USERS_[clean]) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Usuario no permitido');
+  }
+  return ALLOWED_USERS_[clean];
+}
+
+function sanitizarDescripcion_(raw, maxLen) {
+  if (raw === undefined || raw === null) return '';
+  if (typeof raw !== 'string') throw crearErrorApp_('VALIDATION_ERROR', 'Descripción inválida');
+  return raw
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+    .slice(0, maxLen)
+    .replace(/^[=+\-@]+/, '')
+    .trim();
+}
+
+function normalizarDisponibleHoyTexto_(raw) {
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw).replace(/[\r\n\t]+/g, ' ').trim();
+  if (!s || s.length > 28) return '';
+  return /^-?\$\s?[\d.,]{1,22}$/.test(s) ? s : '';
+}
+
+function hashSha256Hex_(str) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(str || ''), Utilities.Charset.UTF_8);
+  return bytes.map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
+}
+
 function getEstadoDiario_() {
   const cfg = leerConfig_();
   const feriadosExtra = leerFilas_('Feriados');
@@ -526,9 +701,12 @@ function getEstadoDiario_() {
   );
 
   const listaRaw = parseJsonConfig_(cfg.listaCompras);
-  const hasBrianWa = !!(String(cfg.greenApiId_Brian || '').trim() && String(cfg.greenApiToken_Brian || '').trim());
-  const hasVirginiaWa = !!(String(cfg.greenApiId_Virginia || '').trim() && String(cfg.greenApiToken_Virginia || '').trim());
-  const whatsappConfigured = !!(String(cfg.whatsappGroupId || '').trim() && (hasBrianWa || hasVirginiaWa));
+  const credsBrian = getGreenApiCreds_(cfg, 'Brian');
+  const credsVirginia = getGreenApiCreds_(cfg, 'Virginia');
+  const hasBrianWa = !!(credsBrian.idInstance && credsBrian.apiToken && credsBrian.apiUrl);
+  const hasVirginiaWa = !!(credsVirginia.idInstance && credsVirginia.apiToken && credsVirginia.apiUrl);
+  const chatIdOk = /^[0-9-]+@(g\.us|c\.us)$/.test(String(cfg.whatsappGroupId || '').trim());
+  const whatsappConfigured = !!(chatIdOk && (hasBrianWa || hasVirginiaWa));
 
   return {
     homeBankingTotal: getConfigNumero_(cfg, 'homeBankingTotal', 0),
@@ -544,19 +722,54 @@ function getEstadoDiario_() {
 }
 
 function guardarMovimiento_(data) {
-  const monto = Number(data.monto);
-  if (isNaN(monto) || monto <= 0) throw new Error('El monto debe ser un número estrictamente mayor a 0');
-  if (!data.fechasAfectadas) throw new Error('Faltan fechas afectadas');
-
-  let fechas = data.fechasAfectadas;
-  if (typeof fechas === 'string') {
-    try { fechas = JSON.parse(fechas); } catch(e) { fechas = [fechas]; }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Datos de movimiento inválidos');
   }
-  if (!Array.isArray(fechas) || !fechas.length) throw new Error('Faltan fechas afectadas válidas');
-  fechas = fechas.map(f => String(f).trim()).filter(Boolean);
-  if (!fechas.length) throw new Error('Faltan fechas afectadas válidas');
+  const monto = Number(data.monto);
+  if (!Number.isFinite(monto) || monto <= 0 || monto > MAX_MONEY_VALUE_) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'El monto debe ser un número válido mayor a 0');
+  }
+  if (data.tipo !== 'single' && data.tipo !== 'divisible') {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Tipo de gasto inválido');
+  }
+  if (!data.fechasAfectadas) throw crearErrorApp_('VALIDATION_ERROR', 'Faltan fechas afectadas');
 
-  if (data.tipo !== 'single' && data.tipo !== 'divisible') throw new Error('Tipo inválido: ' + data.tipo);
+  let rawFechas = data.fechasAfectadas;
+  if (typeof rawFechas === 'string') {
+    try { rawFechas = JSON.parse(rawFechas); } catch (e) { rawFechas = [rawFechas]; }
+  }
+  if (!Array.isArray(rawFechas) || !rawFechas.length) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Faltan fechas afectadas válidas');
+  }
+  const seenFechas = Object.create(null);
+  const fechas = [];
+  for (let i = 0; i < rawFechas.length && fechas.length < 62; i++) {
+    const f = String(rawFechas[i] || '').trim();
+    if (esFechaCalendarioValida_(f) && !seenFechas[f]) {
+      seenFechas[f] = true;
+      fechas.push(f);
+    }
+  }
+  if (!fechas.length) throw crearErrorApp_('VALIDATION_ERROR', 'Faltan fechas afectadas válidas');
+  if (data.tipo === 'single' && fechas.length > 1) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Un gasto único solo puede asignarse a 1 fecha');
+  }
+
+  let hasClientId = false;
+  let id = '';
+  if (data.id !== undefined && data.id !== null && String(data.id).trim() !== '') {
+    const candId = String(data.id).trim();
+    if (!esIdSeguro_(candId)) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'ID de movimiento inválido');
+    }
+    id = candId;
+    hasClientId = true;
+  } else {
+    id = Utilities.getUuid();
+  }
+
+  const descripcion = sanitizarDescripcion_(data.descripcion === undefined ? '' : data.descripcion, 200);
+  const dispHoyLimpio = normalizarDisponibleHoyTexto_(data.disponibleHoyTexto);
 
   let obj = null;
   let waInfo = null;
@@ -571,22 +784,37 @@ function guardarMovimiento_(data) {
     let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
     let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
-    const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
-    const actorUsuario = (data.actorUsuario && String(data.actorUsuario).trim()) ? String(data.actorUsuario).trim() : usuario;
+    const usuario = normalizarUsuarioPermitido_(data.usuario, cfg.usuarioDefault || 'Brian');
+    const actorUsuario = normalizarUsuarioPermitido_(data.actorUsuario, usuario);
 
-    const id = data.id || Utilities.getUuid();
     const filasMov = leerFilas_('Movimientos', true);
-    const movExistente = data.id ? filasMov.find(m => String(m.id).trim() === String(data.id).trim()) : null;
-
-    if (movExistente) {
-      hbTotal += (movExistente.monto || 0);
-      if (movExistente.fromBag) {
-        bolsaTotal += (movExistente.monto || 0);
-      }
-    }
+    const movExistente = hasClientId ? filasMov.find(m => String(m.id).trim() === id) : null;
 
     const nuevoMonto = monto;
     const nuevoFromBag = !!data.fromBag;
+    const fechasOrdenadasExist = movExistente
+      ? (Array.isArray(movExistente.fechasAfectadas) ? movExistente.fechasAfectadas.slice().sort() : [])
+      : [];
+    const fechasOrdenadasNuevas = fechas.slice().sort();
+    const mismasFechas = Boolean(movExistente && JSON.stringify(fechasOrdenadasExist) === JSON.stringify(fechasOrdenadasNuevas));
+
+    if (
+      movExistente &&
+      Number(movExistente.monto) === nuevoMonto &&
+      movExistente.tipo === data.tipo &&
+      String(movExistente.descripcion || '') === descripcion &&
+      Boolean(movExistente.fromBag) === nuevoFromBag &&
+      mismasFechas
+    ) {
+      return limpiarFilaParaCliente_(movExistente);
+    }
+
+    if (movExistente) {
+      hbTotal += (Number(movExistente.monto) || 0);
+      if (movExistente.fromBag) {
+        bolsaTotal += (Number(movExistente.monto) || 0);
+      }
+    }
 
     hbTotal -= nuevoMonto;
     if (nuevoFromBag) {
@@ -604,13 +832,13 @@ function guardarMovimiento_(data) {
       fechasAfectadas: fechas,
       monto: nuevoMonto,
       montoPorFecha: nuevoMonto / fechas.length,
-      descripcion: (data.descripcion || '').trim(),
+      descripcion: descripcion,
       usuario: usuario,
       fromBag: nuevoFromBag,
-      creadoEn: data.creadoEn || (movExistente ? movExistente.creadoEn : new Date().toISOString())
+      creadoEn: (movExistente && movExistente.creadoEn) ? movExistente.creadoEn : new Date().toISOString()
     };
 
-    const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
+    const actualizado = movExistente ? actualizarFilaPorId_('Movimientos', id, obj) : false;
     if (!actualizado) agregarFila_('Movimientos', obj);
 
     if (!data.silencioso) {
@@ -628,8 +856,8 @@ function guardarMovimiento_(data) {
       const antesTxt = (esEdicion && movExistente && Number(movExistente.monto) !== nuevoMonto)
         ? (' (antes ' + formatearMonedaGS_(movExistente.monto) + ')')
         : '';
-      const dispTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
-        ? ('\n💰 Disponible para hoy: *' + String(data.disponibleHoyTexto).trim() + '*')
+      const dispTxt = dispHoyLimpio
+        ? ('\n💰 Disponible para hoy: *' + dispHoyLimpio + '*')
         : '';
       const encabezado = esEdicion ? '✏️ Amorcito, edité este gasto:' : '💸 Amorcito, registré este gasto:';
       const mensajeWa = encabezado + '\n• *' + descLimpia + ':* ' + montoTxt + antesTxt + extraTxt + dispTxt;
@@ -647,10 +875,14 @@ function guardarMovimiento_(data) {
 }
 
 function eliminarMovimiento_(payload) {
-  const id = (payload && typeof payload === 'object') ? payload.id : payload;
-  if (!id) return false;
-  const usuarioPayload = (payload && typeof payload === 'object' && payload.usuario) ? String(payload.usuario).trim() : '';
-  const disponibleHoyTexto = (payload && typeof payload === 'object' && payload.disponibleHoyTexto) ? String(payload.disponibleHoyTexto).trim() : '';
+  const rawId = (payload && typeof payload === 'object') ? payload.id : payload;
+  const id = String(rawId || '').trim();
+  if (!id || !esIdSeguro_(id)) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'ID de movimiento inválido');
+  }
+  const hasUsuarioPayload = Boolean(payload && typeof payload === 'object' && payload.usuario && String(payload.usuario).trim());
+  const usuarioPayload = hasUsuarioPayload ? normalizarUsuarioPermitido_(payload.usuario, 'Brian') : '';
+  const disponibleHoyTexto = normalizarDisponibleHoyTexto_(payload && typeof payload === 'object' ? payload.disponibleHoyTexto : '');
   const silencioso = !!(payload && typeof payload === 'object' && payload.silencioso);
 
   let borrado = false;
@@ -663,16 +895,16 @@ function eliminarMovimiento_(payload) {
     invalidarCacheSheet_('Movimientos');
 
     const filasMov = leerFilas_('Movimientos', true);
-    const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
+    const movExistente = filasMov.find(m => String(m.id).trim() === id);
 
     if (movExistente) {
       const cfg = leerConfig_(true);
       let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
       let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
-      hbTotal += (movExistente.monto || 0);
+      hbTotal += (Number(movExistente.monto) || 0);
       if (movExistente.fromBag) {
-        bolsaTotal += (movExistente.monto || 0);
+        bolsaTotal += (Number(movExistente.monto) || 0);
       }
 
       escribirConfigSinLock_({
@@ -682,7 +914,7 @@ function eliminarMovimiento_(payload) {
 
       borrado = borrarFilaPorId_('Movimientos', id);
       if (borrado && !silencioso) {
-        const actorUsuario = usuarioPayload || movExistente.usuario || cfg.usuarioDefault || 'Brian';
+        const actorUsuario = usuarioPayload || normalizarUsuarioPermitido_(movExistente.usuario, cfg.usuarioDefault || 'Brian');
         const descLimpia = movExistente.descripcion || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
         const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
         const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
@@ -702,6 +934,9 @@ function eliminarMovimiento_(payload) {
 }
 
 function actualizarHB_(payload) {
+  if (payload && (typeof payload !== 'object' || Array.isArray(payload))) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Datos de actualización inválidos');
+  }
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -716,19 +951,23 @@ function actualizarHB_(payload) {
     const cambios = {};
     if (payload && payload.homeBankingTotal !== undefined && payload.homeBankingTotal !== null && payload.homeBankingTotal !== '') {
       const hb = Number(payload.homeBankingTotal);
-      if (isNaN(hb)) throw new Error('homeBankingTotal inválido');
+      if (!Number.isFinite(hb) || Math.abs(hb) > MAX_MONEY_VALUE_) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'homeBankingTotal inválido');
+      }
       cambios.homeBankingTotal = hb;
     }
     if (payload && payload.bolsaTotal !== undefined && payload.bolsaTotal !== null && payload.bolsaTotal !== '') {
       const bolsa = Number(payload.bolsaTotal);
-      if (isNaN(bolsa) || bolsa < 0) throw new Error('bolsaTotal inválido');
+      if (!Number.isFinite(bolsa) || bolsa < 0 || bolsa > MAX_MONEY_VALUE_) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'bolsaTotal inválido');
+      }
       cambios.bolsaTotal = bolsa;
     }
     if (payload && Array.isArray(payload.diasExcluidos)) {
-      const excluidosSolicitados = normalizarDiasExcluidos_(payload.diasExcluidos)
+      const excluidosSolicitados = normalizarDiasExcluidos_(payload.diasExcluidos.slice(0, 100))
         .filter(f => diasInfo.fechas.indexOf(f) !== -1);
       if (diasInfo.fechas.length > 0 && excluidosSolicitados.length >= diasInfo.fechas.length) {
-        throw new Error('Debe quedar al menos 1 día activo');
+        throw crearErrorApp_('VALIDATION_ERROR', 'Debe quedar al menos 1 día activo');
       }
       const previos = normalizarDiasExcluidos_(parseJsonConfig_(cfgActual.diasExcluidos));
       const historicosPreservados = previos.filter(f =>
@@ -755,6 +994,22 @@ function actualizarHB_(payload) {
 }
 
 function resolverCierreDia_(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Datos de cierre inválidos');
+  }
+  const decision = String(payload.decision || 'redistribuir').trim();
+  if (decision !== 'bolsa' && decision !== 'redistribuir') {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Decisión de cierre inválida');
+  }
+  const tipo = String(payload.tipo || 'sobrante').trim();
+  if (tipo !== 'sobrante' && tipo !== 'deficit') {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Tipo de cierre inválido');
+  }
+  const monto = payload.monto === undefined || payload.monto === null || payload.monto === '' ? 0 : Number(payload.monto);
+  if (!Number.isFinite(monto) || monto < 0 || monto > MAX_MONEY_VALUE_) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Monto de cierre inválido');
+  }
+
   const hoyStr = formatearFechaISO_(new Date());
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -767,9 +1022,8 @@ function resolverCierreDia_(payload) {
     }
 
     const cambios = { lastProcessedDate: hoyStr };
-    if (payload && payload.decision === 'bolsa') {
-      const monto = Math.max(0, Number(payload.monto) || 0);
-      if (payload.tipo === 'sobrante') {
+    if (decision === 'bolsa') {
+      if (tipo === 'sobrante') {
         bolsaActual += monto;
       } else {
         bolsaActual = Math.max(bolsaActual - monto, 0);
@@ -782,11 +1036,6 @@ function resolverCierreDia_(payload) {
   } finally {
     lock.releaseLock();
   }
-}
-
-function actualizarConfig_(cambios) {
-  setConfigValores_(cambios);
-  return leerConfig_();
 }
 
 function parseJsonConfig_(rawVal) {
@@ -835,13 +1084,20 @@ function formatearMonedaGS_(n) {
 }
 
 function getGreenApiCreds_(cfg, usuario) {
-  const user = String(usuario || '').trim() === 'Virginia' ? 'Virginia' : 'Brian';
+  const user = normalizarUsuarioPermitido_(usuario, 'Brian');
   const rawUrl = String((cfg && cfg['greenApiUrl_' + user]) || '').trim().replace(/\/+$/, '');
+  const apiUrl = rawUrl
+    ? (GREEN_API_URL_REGEX_.test(rawUrl) ? rawUrl : '')
+    : 'https://api.green-api.com';
+  const rawId = String((cfg && cfg['greenApiId_' + user]) || '').trim();
+  const idInstance = /^\d{4,20}$/.test(rawId) ? rawId : '';
+  const propToken = getScriptProp_('greenApiToken_' + user);
+  const sheetToken = String((cfg && cfg['greenApiToken_' + user]) || '').trim();
   return {
     usuario: user,
-    apiUrl: rawUrl || 'https://api.green-api.com',
-    idInstance: String((cfg && cfg['greenApiId_' + user]) || '').trim(),
-    apiToken: String((cfg && cfg['greenApiToken_' + user]) || '').trim()
+    apiUrl: apiUrl,
+    idInstance: idInstance,
+    apiToken: propToken || sheetToken
   };
 }
 
@@ -850,7 +1106,7 @@ function enviarWhatsAppGreenApi_(cfg, deUsuario, mensaje) {
   const creds = getGreenApiCreds_(cfg, deUsuario);
   const texto = String(mensaje || '').trim();
 
-  if (!chatId || !creds.idInstance || !creds.apiToken || !texto) {
+  if (!/^[0-9-]+@(g\.us|c\.us)$/.test(chatId) || !creds.apiUrl || !creds.idInstance || !creds.apiToken || !texto) {
     return { sent: false, reason: 'missing_greenapi_config', usuario: creds.usuario };
   }
 
@@ -863,19 +1119,22 @@ function enviarWhatsAppGreenApi_(cfg, deUsuario, mensaje) {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify({ chatId: chatId, message: texto }),
-      muteHttpExceptions: true
+      muteHttpExceptions: true,
+      followRedirects: false
     });
 
     const status = res.getResponseCode();
-    const bodyText = res.getContentText();
+    if (status < 200 || status >= 300) {
+      Logger.log('Green API HTTP ' + status + ' para ' + creds.usuario);
+    }
     return {
       sent: status >= 200 && status < 300,
       status: status,
-      usuario: creds.usuario,
-      response: bodyText
+      usuario: creds.usuario
     };
   } catch (e) {
-    return { sent: false, usuario: creds.usuario, error: String(e) };
+    Logger.log('Error enviando WhatsApp (' + creds.usuario + '): ' + redactarSecretosTexto_(String(e)));
+    return { sent: false, reason: 'network_error', usuario: creds.usuario };
   }
 }
 
@@ -886,8 +1145,8 @@ function listarGruposWhatsApp(usuario) {
     const alt = getGreenApiCreds_(cfg, 'Virginia');
     if (alt.idInstance && alt.apiToken) creds = alt;
   }
-  if (!creds.idInstance || !creds.apiToken) {
-    Logger.log('Faltan credenciales greenApiId_' + creds.usuario + ' o greenApiToken_' + creds.usuario + ' en Config.');
+  if (!creds.apiUrl || !creds.idInstance || !creds.apiToken) {
+    Logger.log('Faltan credenciales de Green API válidas para ' + creds.usuario + '.');
     return [];
   }
 
@@ -895,11 +1154,11 @@ function listarGruposWhatsApp(usuario) {
     const endpoint = creds.apiUrl +
       '/waInstance' + encodeURIComponent(creds.idInstance) +
       '/getChats/' + encodeURIComponent(creds.apiToken);
-    const res = UrlFetchApp.fetch(endpoint, { method: 'get', muteHttpExceptions: true });
+    const res = UrlFetchApp.fetch(endpoint, { method: 'get', muteHttpExceptions: true, followRedirects: false });
     const status = res.getResponseCode();
     const bodyText = res.getContentText();
     if (status < 200 || status >= 300) {
-      Logger.log('Error getChats (' + status + '): ' + bodyText);
+      Logger.log('Error getChats (' + status + ') para ' + creds.usuario);
       return [];
     }
     const chats = JSON.parse(bodyText);
@@ -909,7 +1168,7 @@ function listarGruposWhatsApp(usuario) {
     grupos.forEach(g => Logger.log(g.name + ' -> ' + g.id));
     return grupos;
   } catch (e) {
-    Logger.log('Error listando grupos WhatsApp: ' + String(e));
+    Logger.log('Error listando grupos WhatsApp: ' + redactarSecretosTexto_(String(e)));
     return [];
   }
 }
@@ -932,11 +1191,15 @@ const WA_PRESET_MESSAGES = [
 ];
 
 function enviarMensaje_(payload) {
-  const texto = String((payload && payload.texto) || '').trim().slice(0, 500);
-  if (!texto) throw new Error('Escribí un mensaje antes de enviar');
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Datos de mensaje inválidos');
+  }
+  const rawTexto = typeof payload.texto === 'string' ? payload.texto : '';
+  const texto = rawTexto.trim().slice(0, 500);
+  if (!texto) throw crearErrorApp_('VALIDATION_ERROR', 'Escribí un mensaje antes de enviar');
 
   const cfg = leerConfig_();
-  const deUsuario = (payload && payload.de && String(payload.de).trim()) || (cfg.usuarioDefault || 'Brian');
+  const deUsuario = normalizarUsuarioPermitido_(payload.de, cfg.usuarioDefault || 'Brian');
   const waResult = enviarWhatsAppGreenApi_(cfg, deUsuario, texto);
   return { ok: true, de: deUsuario, texto: texto, whatsapp: waResult };
 }
@@ -977,7 +1240,7 @@ function construirMenuWhatsApp_() {
 
 function enviarListaComprasWhatsApp_(payload) {
   const cfg = leerConfig_(true);
-  const deUsuario = (payload && payload.de && String(payload.de).trim()) || (cfg.usuarioDefault || 'Brian');
+  const deUsuario = normalizarUsuarioPermitido_(payload && payload.de, cfg.usuarioDefault || 'Brian');
   const texto = formatearListaComprasWhatsApp_(cfg);
   const waResult = enviarWhatsAppGreenApi_(cfg, deUsuario, texto);
   return { ok: true, de: deUsuario, texto: texto, whatsapp: waResult };
@@ -996,12 +1259,30 @@ function procesarWebhookGreenApi_(body) {
     return { handled: false, reason: 'ignored_chat' };
   }
 
+  const idInst = String((body && body.instanceData && body.instanceData.idInstance) || '').trim();
+  const idBrian = String((cfg && cfg.greenApiId_Brian) || '').trim();
+  const idVirginia = String((cfg && cfg.greenApiId_Virginia) || '').trim();
+  let instanciaUser = '';
+  if (idInst && idVirginia && idInst === idVirginia) {
+    instanciaUser = 'Virginia';
+  } else if (idInst && idBrian && idInst === idBrian) {
+    instanciaUser = 'Brian';
+  } else {
+    return { handled: false, reason: 'unauthorized_instance' };
+  }
+
   const idMsg = String((body && body.idMessage) || '').trim();
   const cache = CacheService.getScriptCache();
   if (idMsg) {
-    const dedupKey = 'wa_msg_' + idMsg;
-    if (cache.get(dedupKey)) return { handled: false, reason: 'duplicate' };
-    cache.put(dedupKey, '1', 120);
+    const dedupKey = 'wa_msg_' + hashSha256Hex_(idMsg).slice(0, 40);
+    const lock = LockService.getScriptLock();
+    const gotLock = (typeof lock.tryLock === 'function') ? lock.tryLock(3000) : true;
+    try {
+      if (cache.get(dedupKey)) return { handled: false, reason: 'duplicate' };
+      cache.put(dedupKey, '1', 120);
+    } finally {
+      if (gotLock) lock.releaseLock();
+    }
   }
 
   const msgData = (body && body.messageData) || {};
@@ -1010,7 +1291,7 @@ function procesarWebhookGreenApi_(body) {
     (msgData.extendedTextMessageData && msgData.extendedTextMessageData.text) ||
     ''
   ).trim();
-  if (!rawText) return { handled: false, reason: 'empty_text' };
+  if (!rawText || rawText.length > 500) return { handled: false, reason: 'empty_text' };
 
   const cmd = rawText
     .toLowerCase()
@@ -1018,7 +1299,7 @@ function procesarWebhookGreenApi_(body) {
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
-  const menuKey = 'wa_menu_activo_' + chatId;
+  const menuKey = 'wa_menu_' + hashSha256Hex_(chatId).slice(0, 32);
   const menuActivo = !!cache.get(menuKey);
   let respuesta = '';
 
@@ -1043,8 +1324,6 @@ function procesarWebhookGreenApi_(body) {
     return { handled: false, reason: 'not_a_command' };
   }
 
-  const idInst = String((body && body.instanceData && body.instanceData.idInstance) || '').trim();
-  const instanciaUser = (idInst && String(cfg.greenApiId_Virginia || '').trim() === idInst) ? 'Virginia' : 'Brian';
   const actorUsuario = tipo === 'outgoingMessageReceived'
     ? instanciaUser
     : (instanciaUser === 'Virginia' ? 'Brian' : 'Virginia');
@@ -1055,21 +1334,34 @@ function procesarWebhookGreenApi_(body) {
   return { handled: true, command: cmd, usuario: usuarioEnvio, whatsapp: waResult };
 }
 
-function normalizarItemListaCompras_(it) {
-  if (!it || typeof it !== 'object') return null;
-  const texto = String(it.texto || '').trim().slice(0, 120);
+function normalizarItemListaCompras_(it, serverCreatedAt) {
+  if (!it || typeof it !== 'object' || Array.isArray(it)) return null;
+  const texto = String(it.texto || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 120).replace(/^[=+\-@]+/, '').trim();
   const id = String(it.id || '').trim();
-  if (!id || !texto) return null;
+  if (!id || !esIdSeguro_(id) || !texto) return null;
+  const rawAutor = String(it.autor || '').trim();
+  const autor = ALLOWED_USERS_[rawAutor] || 'Brian';
+  const creado = serverCreatedAt !== undefined
+    ? String(serverCreatedAt)
+    : String(it.creadoEn || new Date().toISOString()).slice(0, 40);
   return {
     id: id,
     texto: texto,
     done: !!it.done,
-    autor: String(it.autor || '').trim() || 'Brian',
-    creadoEn: String(it.creadoEn || new Date().toISOString())
+    autor: autor,
+    creadoEn: creado
   };
 }
 
 function guardarListaCompras_(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Datos de lista de compras inválidos');
+  }
+  const op = String(payload.op || '').trim();
+  if (op !== 'add' && op !== 'toggle' && op !== 'delete' && op !== 'clearDone') {
+    throw crearErrorApp_('VALIDATION_ERROR', 'Operación de lista de compras no permitida');
+  }
+
   let lista = [];
   let waMensaje = '';
   let waUsuario = 'Brian';
@@ -1083,32 +1375,42 @@ function guardarListaCompras_(payload) {
     cfgSnapshot = cfg;
     const parsed = parseJsonConfig_(cfg.listaCompras);
     lista = Array.isArray(parsed)
-      ? parsed.map(normalizarItemListaCompras_).filter(Boolean)
+      ? parsed.slice(0, 150).map(it => normalizarItemListaCompras_(it)).filter(Boolean)
       : [];
 
-    waUsuario = String(
-      (payload && payload.usuario) ||
-      (payload && payload.item && payload.item.autor) ||
-      cfg.usuarioDefault ||
-      'Brian'
-    ).trim();
+    const fallbackAutor = (payload.item && payload.item.autor && ALLOWED_USERS_[String(payload.item.autor).trim()]) || cfg.usuarioDefault || 'Brian';
+    waUsuario = normalizarUsuarioPermitido_(payload.usuario, fallbackAutor);
 
-    const op = String((payload && payload.op) || '').trim();
-    if (op === 'add' && payload.item) {
-      const nuevo = normalizarItemListaCompras_(payload.item);
-      if (nuevo) {
-        const idx = lista.findIndex(x => String(x.id) === nuevo.id);
-        if (idx >= 0) {
-          lista[idx] = nuevo;
-        } else {
-          lista.unshift(nuevo);
-          if (!nuevo.done) {
-            waMensaje = '🛒 Amorcito, agregué a la lista de compras:\n- ' + nuevo.texto;
-          }
+    if (op === 'add') {
+      if (!payload.item || typeof payload.item !== 'object') {
+        throw crearErrorApp_('VALIDATION_ERROR', 'Ítem inválido');
+      }
+      const rawAddId = String(payload.item.id || '').trim();
+      if (!esIdSeguro_(rawAddId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
+      const existing = lista.find(x => String(x.id) === rawAddId);
+      const nuevo = normalizarItemListaCompras_(
+        payload.item,
+        existing ? existing.creadoEn : new Date().toISOString()
+      );
+      if (!nuevo) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'Texto o ID de ítem inválido');
+      }
+      const idx = lista.findIndex(x => String(x.id) === nuevo.id);
+      if (idx >= 0) {
+        lista[idx] = nuevo;
+      } else {
+        lista.unshift(nuevo);
+        if (!nuevo.done) {
+          waMensaje = '🛒 Amorcito, agregué a la lista de compras:\n- ' + nuevo.texto;
         }
       }
-    } else if (op === 'toggle' && payload.id) {
-      const targetId = String(payload.id).trim();
+    } else if (op === 'toggle') {
+      const targetId = String(payload.id || '').trim();
+      if (!esIdSeguro_(targetId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
       const idx = lista.findIndex(x => String(x.id) === targetId);
       if (idx >= 0) {
         const estabaHecho = !!lista[idx].done;
@@ -1120,10 +1422,13 @@ function guardarListaCompras_(payload) {
             : ('🛒 Amorcito, volví a agregar a la lista de compras:\n- ' + lista[idx].texto);
         }
       } else if (Array.isArray(payload.items)) {
-        lista = payload.items.map(normalizarItemListaCompras_).filter(Boolean);
+        lista = payload.items.slice(0, 150).map(it => normalizarItemListaCompras_(it, new Date().toISOString())).filter(Boolean);
       }
-    } else if (op === 'delete' && payload.id) {
-      const targetId = String(payload.id).trim();
+    } else if (op === 'delete') {
+      const targetId = String(payload.id || '').trim();
+      if (!esIdSeguro_(targetId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
       const idx = lista.findIndex(x => String(x.id) === targetId);
       if (idx >= 0) {
         if (!lista[idx].done) {
@@ -1133,8 +1438,6 @@ function guardarListaCompras_(payload) {
       }
     } else if (op === 'clearDone') {
       lista = lista.filter(x => !x.done);
-    } else if (Array.isArray(payload && payload.items)) {
-      lista = payload.items.map(normalizarItemListaCompras_).filter(Boolean);
     }
 
     if (lista.length > 150) lista = lista.slice(0, 150);
@@ -1152,8 +1455,91 @@ function guardarListaCompras_(payload) {
 }
 
 // ============================================================
-// 7. SETUP INICIAL
+// 7. SETUP INICIAL Y GESTIÓN DE SECRETOS (SOLO EDITOR APPS SCRIPT)
 // ============================================================
+
+function generarClaveAcceso() {
+  const key = generarTokenSeguro_(32);
+  PropertiesService.getScriptProperties().setProperty('APP_ACCESS_KEY', key);
+  Logger.log('APP_ACCESS_KEY generada y guardada en Propiedades del Script.');
+  Logger.log('Copiá esta clave única para cargarla 1 vez en tu teléfono y en el de Virginia: ' + key);
+  return key;
+}
+
+function generarSecretoWebhook() {
+  const secret = generarTokenSeguro_(32);
+  PropertiesService.getScriptProperties().setProperty('WEBHOOK_SECRET', secret);
+  Logger.log('WEBHOOK_SECRET guardado en Propiedades del Script.');
+  Logger.log('Agregá ?wh=' + secret + ' al final de la URL de webhook en Green API (Brian y Virginia).');
+  return secret;
+}
+
+function configurarTokenGreenApi(usuario, nuevoToken) {
+  if (usuario !== 'Brian' && usuario !== 'Virginia') {
+    throw new Error("El usuario debe ser exactamente 'Brian' o 'Virginia'");
+  }
+  const user = usuario;
+  const token = String(nuevoToken || '').trim();
+  if (!token) throw new Error('El token no puede estar vacío');
+  PropertiesService.getScriptProperties().setProperty('greenApiToken_' + user, token);
+  eliminarClavesConfigSheet_(['greenApiToken_' + user]);
+  Logger.log('Token de Green API guardado en ScriptProperties para ' + user + '.');
+  return true;
+}
+
+function migrarSecretosAProperties() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    const props = PropertiesService.getScriptProperties();
+    const migrados = [];
+    const clavesBorrar = [];
+    ['Brian', 'Virginia'].forEach(user => {
+      const k = 'greenApiToken_' + user;
+      const val = String((cfg && cfg[k]) || '').trim();
+      if (val) {
+        props.setProperty(k, val);
+        migrados.push(user);
+      }
+      clavesBorrar.push(k);
+    });
+    eliminarClavesConfigSheetSinLock_(clavesBorrar);
+    Logger.log('Migración a ScriptProperties completada. Tokens migrados: ' + (migrados.length ? migrados.join(', ') : 'ninguno (ya estaban vacíos/migrados)'));
+    return { migrados: migrados };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function eliminarClavesConfigSheet_(keys) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    eliminarClavesConfigSheetSinLock_(keys);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function eliminarClavesConfigSheetSinLock_(keys) {
+  const sheet = getSheet_('Config', false);
+  if (!sheet || !Array.isArray(keys) || !keys.length) return;
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return;
+  for (let i = values.length - 1; i >= 1; i--) {
+    const key = String(values[i][0] || '').trim();
+    if (keys.indexOf(key) !== -1) {
+      if (sheet.getMaxRows() <= 2) {
+        sheet.getRange(i + 1, 1, 1, 2).clearContent();
+      } else {
+        sheet.deleteRow(i + 1);
+      }
+    }
+  }
+  invalidarCacheSheet_('Config');
+}
 
 function setupSheets() {
   Object.keys(SHEET_SCHEMAS).forEach(nombre => {
@@ -1161,12 +1547,7 @@ function setupSheets() {
     const schema = SHEET_SCHEMAS[nombre];
     const sheet = getSheet_(nombre, true);
     const filasFmt = Math.min(Math.max(sheet.getMaxRows() - 1, 1), 998);
-    schema.columns.forEach((col, idx) => {
-      const tipo = schema.types[col];
-      if (tipo === 'string' || tipo === 'json') {
-        sheet.getRange(2, idx + 1, filasFmt, 1).setNumberFormat('@');
-      }
-    });
+    aplicarFormatoTextoColumnas_(sheet, nombre, 2, filasFmt);
   });
 
   const cfg = leerConfig_(true);
@@ -1177,10 +1558,8 @@ function setupSheets() {
     whatsappGroupId: cfg.whatsappGroupId || '',
     greenApiUrl_Brian: cfg.greenApiUrl_Brian || 'https://api.green-api.com',
     greenApiId_Brian: cfg.greenApiId_Brian || '',
-    greenApiToken_Brian: cfg.greenApiToken_Brian || '',
     greenApiUrl_Virginia: cfg.greenApiUrl_Virginia || 'https://api.green-api.com',
-    greenApiId_Virginia: cfg.greenApiId_Virginia || '',
-    greenApiToken_Virginia: cfg.greenApiToken_Virginia || ''
+    greenApiId_Virginia: cfg.greenApiId_Virginia || ''
   });
 
   limpiarConfigLegacy_();
@@ -1189,10 +1568,6 @@ function setupSheets() {
 }
 
 function limpiarConfigLegacy_() {
-  const sheet = getSheet_('Config', false);
-  if (!sheet) return;
-  const values = sheet.getDataRange().getValues();
-  if (values.length < 2) return;
   const legacyKeys = [
     'accentColorBrian',
     'accentColorVirginia',
@@ -1203,24 +1578,5 @@ function limpiarConfigLegacy_() {
     'ultimaNotificacion',
     'ultimoMensaje'
   ];
-  for (let i = values.length - 1; i >= 1; i--) {
-    const key = String(values[i][0] || '').trim();
-    if (legacyKeys.includes(key)) {
-      sheet.deleteRow(i + 1);
-    }
-  }
-  invalidarCacheSheet_('Config');
-}
-
-function diagnosticoConexion_() {
-  const resultado = {};
-  Object.keys(SHEET_SCHEMAS).forEach(nombre => {
-    const sheet = getSheet_(nombre, true);
-    resultado[nombre] = {
-      maxCols: sheet.getMaxColumns(),
-      lastCol: sheet.getLastColumn(),
-      headers: sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0]
-    };
-  });
-  return resultado;
+  eliminarClavesConfigSheet_(legacyKeys);
 }

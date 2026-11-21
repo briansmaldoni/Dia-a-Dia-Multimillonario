@@ -8,6 +8,14 @@
 // CONFIGURACIÓN DE CONEXIÓN AL BACKEND
 // ============================================================
 const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbwHJx8AhDKR5k1eZSQ74hleTxUSy_0I_u83aOOvxIOK1IqtF_e87joQdpmDw70wSF7w/exec';
+const ACCESS_KEY_STORAGE_KEY = 'app_access_key';
+const ALLOWED_USERS_ = ['Brian', 'Virginia'];
+
+function normalizarUsuarioLocal_(usuario, fallback) {
+  if (ALLOWED_USERS_.includes(usuario)) return usuario;
+  if (ALLOWED_USERS_.includes(fallback)) return fallback;
+  return 'Brian';
+}
 
 // ============================================================
 // ESTADO GLOBAL Y SINCRONIZACIÓN EN SEGUNDO PLANO
@@ -46,10 +54,160 @@ let editingMovimientoId = null;
 let cierreDiaPendiente = null;
 
 let pendingSyncCount = 0;
+let authPaused_ = false;
 
 // ============================================================
-// CLIENTE DE API (Apps Script) & BACKGROUND SYNC
+// CLAVE DE ACCESO Y CLIENTE DE API (Apps Script)
 // ============================================================
+
+function getStoredAccessKey_() {
+  try {
+    return String(localStorage.getItem(ACCESS_KEY_STORAGE_KEY) || '').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function setStoredAccessKey_(key) {
+  try {
+    const clean = String(key || '').trim();
+    if (!clean) {
+      localStorage.removeItem(ACCESS_KEY_STORAGE_KEY);
+    } else {
+      localStorage.setItem(ACCESS_KEY_STORAGE_KEY, clean);
+    }
+  } catch (e) {}
+}
+
+function createApiError_(json, fallbackMsg) {
+  const err = new Error((json && json.error) || fallbackMsg || 'Error de comunicación');
+  if (json && json.code) err.code = json.code;
+  if (json && json.status) err.status = json.status;
+  return err;
+}
+
+function isAuthError_(err) {
+  const code = err && err.code ? String(err.code) : '';
+  return code === 'UNAUTHORIZED' || code === 'AUTH_NOT_CONFIGURED';
+}
+
+function isRetryableBackendError_(err) {
+  if (isAuthError_(err)) return false;
+  const code = err && err.code ? String(err.code) : '';
+  if (code === 'LOCK_TIMEOUT') return true;
+  return isNetworkOrTimeoutError_(err);
+}
+
+function openAccessKeyModal_(errorMsg) {
+  const modal = document.getElementById('access-key-modal');
+  const errEl = document.getElementById('access-key-error');
+  const inputEl = document.getElementById('access-key-input');
+  if (errEl) {
+    if (errorMsg) {
+      errEl.textContent = errorMsg;
+      errEl.classList.remove('hidden');
+    } else {
+      errEl.textContent = '';
+      errEl.classList.add('hidden');
+    }
+  }
+  if (modal && !modal.classList.contains('active')) {
+    modal.classList.add('active');
+    syncPullToRefreshGuard_();
+  }
+  if (inputEl && typeof inputEl.focus === 'function') {
+    setTimeout(() => {
+      try { inputEl.focus(); } catch (e) {}
+    }, 60);
+  }
+}
+
+function closeAccessKeyModal_() {
+  const modal = document.getElementById('access-key-modal');
+  const errEl = document.getElementById('access-key-error');
+  const inputEl = document.getElementById('access-key-input');
+  if (errEl) {
+    errEl.textContent = '';
+    errEl.classList.add('hidden');
+  }
+  if (inputEl) inputEl.value = '';
+  if (modal) modal.classList.remove('active');
+  resetAppScrollToTop_();
+  syncPullToRefreshGuard_();
+}
+
+function handleAuthFailure_(err) {
+  authPaused_ = true;
+  const code = err && err.code ? String(err.code) : 'UNAUTHORIZED';
+  if (code === 'UNAUTHORIZED' && getStoredAccessKey_()) {
+    setStoredAccessKey_('');
+  }
+  const msg = code === 'AUTH_NOT_CONFIGURED'
+    ? 'Falta configurar APP_ACCESS_KEY en Google Apps Script (ejecutá generarClaveAcceso).'
+    : ((err && err.message) || 'Ingresá la clave de acceso para sincronizar.');
+  openAccessKeyModal_(msg);
+}
+
+async function submitAccessKeyForm_() {
+  const inputEl = document.getElementById('access-key-input');
+  const errEl = document.getElementById('access-key-error');
+  const btnEl = document.getElementById('btn-submit-access-key');
+  const candidate = String(inputEl ? inputEl.value : '').trim();
+
+  if (!candidate) {
+    openAccessKeyModal_('Ingresá una clave válida.');
+    return;
+  }
+  if (errEl) {
+    errEl.textContent = '';
+    errEl.classList.add('hidden');
+  }
+
+  const prevLabel = btnEl ? btnEl.textContent : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = 'Verificando...';
+  }
+
+  try {
+    const res = await fetchWithRetry(BACKEND_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'getEstadoDiario', payload: {}, accessKey: candidate })
+    }, 2, 25000);
+    const json = await res.json();
+    if (!json || !json.ok) {
+      throw createApiError_(json, 'Clave de acceso incorrecta');
+    }
+
+    setStoredAccessKey_(candidate);
+    authPaused_ = false;
+    closeAccessKeyModal_();
+
+    if (getPendingSyncQueue_().length > 0) {
+      await processPendingSyncQueue_();
+      if (getPendingSyncQueue_().length === 0 && !authPaused_) {
+        await recargarEstadoDiario_(false);
+        try { await chequearCierreDia_(); } catch (e) {}
+      }
+    } else {
+      aplicarEstadoDiario_(json.data);
+      try { await chequearCierreDia_(); } catch (e) {}
+    }
+    showAppToast('Acceso desbloqueado');
+  } catch (err) {
+    const code = err && err.code ? String(err.code) : '';
+    const msg = code === 'AUTH_NOT_CONFIGURED'
+      ? 'Falta configurar APP_ACCESS_KEY en Apps Script (ejecutá generarClaveAcceso).'
+      : ((err && err.message) || 'No se pudo validar la clave. Verificá tu conexión e intentá de nuevo.');
+    openAccessKeyModal_(msg);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = prevLabel;
+    }
+  }
+}
 
 async function fetchWithRetry(url, options, maxRetries = 3, timeoutMs = 35000) {
   let attempt = 0;
@@ -61,10 +219,17 @@ async function fetchWithRetry(url, options, maxRetries = 3, timeoutMs = 35000) {
       const opts = Object.assign({}, options, { signal: controller.signal });
       const res = await fetch(url, opts);
       clearTimeout(timer);
-      if (!res.ok) throw new Error('HTTP Error ' + res.status);
+      if (!res.ok) {
+        const httpErr = new Error('HTTP Error ' + res.status);
+        httpErr.status = res.status;
+        throw httpErr;
+      }
       return res;
     } catch (err) {
       clearTimeout(timer);
+      if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+        throw err;
+      }
       if (attempt >= maxRetries) throw err;
       const delay = Math.pow(2, attempt - 1) * 600;
       await new Promise(r => setTimeout(r, delay));
@@ -73,13 +238,26 @@ async function fetchWithRetry(url, options, maxRetries = 3, timeoutMs = 35000) {
 }
 
 async function callBackend(action, payload) {
+  const accessKey = getStoredAccessKey_();
+  if (!accessKey) {
+    const authErr = createApiError_({ ok: false, code: 'UNAUTHORIZED', error: 'Ingresá tu clave de acceso para continuar.' });
+    handleAuthFailure_(authErr);
+    throw authErr;
+  }
+
   const res = await fetchWithRetry(BACKEND_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action: action, payload: payload || {} })
+    body: JSON.stringify({ action: action, payload: payload || {}, accessKey: accessKey })
   }, 3, 35000);
   const json = await res.json();
-  if (!json.ok) throw new Error(json.error || ('Error en ' + action));
+  if (!json.ok) {
+    const apiErr = createApiError_(json, 'Error en ' + action);
+    if (isAuthError_(apiErr)) {
+      handleAuthFailure_(apiErr);
+    }
+    throw apiErr;
+  }
   return json.data;
 }
 
@@ -121,8 +299,11 @@ function savePendingSyncQueue_(queue) {
 
 function enqueuePendingSync_(action, payload) {
   const queue = getPendingSyncQueue_();
+  const idSuffix = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : (Date.now() + '_' + Math.random().toString(36).slice(2, 8));
   queue.push({
-    id: 'sync_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    id: 'sync_' + idSuffix,
     action: action,
     payload: payload,
     timestamp: Date.now()
@@ -152,14 +333,18 @@ function isNetworkOrTimeoutError_(err) {
 async function processPendingSyncQueue_() {
   if (isProcessingSyncQueue_) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-
   if (!getPendingSyncQueue_().length) return;
+  if (authPaused_ || !getStoredAccessKey_()) {
+    if (!getStoredAccessKey_()) openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar los cambios pendientes.');
+    return;
+  }
 
   isProcessingSyncQueue_ = true;
   mostrarSyncToast_();
   try {
     while (true) {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+      if (authPaused_ || !getStoredAccessKey_()) break;
       const queue = getPendingSyncQueue_();
       if (!queue.length) break;
       const item = queue[0];
@@ -168,16 +353,21 @@ async function processPendingSyncQueue_() {
         savePendingSyncQueue_(getPendingSyncQueue_().filter(x => x.id !== item.id));
       } catch (err) {
         console.error('Error procesando ítem de cola pendiente:', item, err);
-        if (isNetworkOrTimeoutError_(err)) {
-          // Conexión inestable: preservar cola y esperar al próximo reintento/online
+        if (isAuthError_(err)) {
+          // Preservar cola y pausar hasta que el usuario re-ingrese clave
+          authPaused_ = true;
+          handleAuthFailure_(err);
+          break;
+        } else if (isRetryableBackendError_(err)) {
+          // Conexión inestable o LOCK_TIMEOUT: preservar cola y esperar al próximo reintento
           break;
         } else {
-          // Error fatal en datos de la petición: descartar para evitar bloqueo permanente
+          // Error fatal en datos de la petición (ej. VALIDATION_ERROR): descartar para evitar bloqueo permanente
           savePendingSyncQueue_(getPendingSyncQueue_().filter(x => x.id !== item.id));
         }
       }
     }
-    if (getPendingSyncQueue_().length === 0) {
+    if (!authPaused_ && getPendingSyncQueue_().length === 0) {
       showAppToast('Sincronización pendiente completada');
     }
   } finally {
@@ -195,10 +385,20 @@ if (typeof window !== 'undefined') {
 
 async function callBackendBackground(action, payload) {
   const queue = getPendingSyncQueue_();
-  // Si ya hay operaciones pendientes, en curso o sin conexión, encolar para garantizar orden FIFO
-  if ((typeof navigator !== 'undefined' && navigator.onLine === false) || queue.length > 0 || pendingSyncCount > 0 || isProcessingSyncQueue_) {
+  const missingKey = !getStoredAccessKey_();
+  // Si hay bloqueo de auth, sin conexión u operaciones pendientes, encolar para garantizar orden FIFO
+  if (
+    (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+    authPaused_ ||
+    missingKey ||
+    queue.length > 0 ||
+    pendingSyncCount > 0 ||
+    isProcessingSyncQueue_
+  ) {
     enqueuePendingSync_(action, payload);
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    if (missingKey || authPaused_) {
+      openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar tus movimientos guardados.');
+    } else if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       showAppToast('Sin conexión: acción guardada para sincronizar al volver en línea');
     } else if (pendingSyncCount === 0 && !isProcessingSyncQueue_) {
       processPendingSyncQueue_();
@@ -206,6 +406,7 @@ async function callBackendBackground(action, payload) {
     return null;
   }
 
+  let failedRetryable = false;
   pendingSyncCount++;
   syncPullToRefreshGuard_();
   mostrarSyncToast_();
@@ -214,9 +415,16 @@ async function callBackendBackground(action, payload) {
     return res;
   } catch (err) {
     console.error('Error en sync background (' + action + '):', err);
-    if (isNetworkOrTimeoutError_(err)) {
+    if (isAuthError_(err)) {
+      failedRetryable = true;
       enqueuePendingSync_(action, payload);
-      showAppToast('Fallo de red: acción guardada en cola para reintentar', true);
+      handleAuthFailure_(err);
+      return null;
+    }
+    if (isRetryableBackendError_(err)) {
+      failedRetryable = true;
+      enqueuePendingSync_(action, payload);
+      showAppToast('Fallo de red o servidor ocupado: acción guardada en cola para reintentar', true);
       return null;
     }
     showAppToast('Error de sincronización: ' + (err.message || 'Fallo de red'), true);
@@ -226,7 +434,7 @@ async function callBackendBackground(action, payload) {
     if (pendingSyncCount <= 0) {
       pendingSyncCount = 0;
       ocultarSyncToast_();
-      if (getPendingSyncQueue_().length > 0 && !isProcessingSyncQueue_) {
+      if (!failedRetryable && !authPaused_ && getStoredAccessKey_() && getPendingSyncQueue_().length > 0 && !isProcessingSyncQueue_) {
         processPendingSyncQueue_();
       }
     }
@@ -831,7 +1039,7 @@ function renderPaletteOptions_() {
 
   grid.innerHTML = PALETAS_COLORES_.map(p => {
     const isSelected = p.id === activeId;
-    return '<button type="button" onclick="seleccionarPaletaUsuario(\'' + p.id + '\')" class="palette-option-card ' + (isSelected ? 'active' : '') + '">' +
+    return '<button type="button" data-palette-id="' + escapeHtml_(p.id) + '" class="palette-option-card ' + (isSelected ? 'active' : '') + '">' +
       '<div class="flex items-center gap-3 min-w-0">' +
         '<span class="palette-swatches">' +
           '<span class="palette-swatch-dot" style="background-color:' + p.primary + ';"></span>' +
@@ -839,8 +1047,8 @@ function renderPaletteOptions_() {
           '<span class="palette-swatch-dot" style="background-color:' + p.surface + ';"></span>' +
         '</span>' +
         '<div class="min-w-0">' +
-          '<span class="text-sm font-bold text-zinc-800 block leading-tight truncate">' + p.nombre + '</span>' +
-          '<span class="text-[11px] text-zinc-500 block leading-tight truncate">' + p.desc + '</span>' +
+          '<span class="text-sm font-bold text-zinc-800 block leading-tight truncate">' + escapeHtml_(p.nombre) + '</span>' +
+          '<span class="text-[11px] text-zinc-500 block leading-tight truncate">' + escapeHtml_(p.desc) + '</span>' +
         '</div>' +
       '</div>' +
       (isSelected
@@ -952,7 +1160,7 @@ function initAvatarLongPress_() {
 }
 
 function cargarUsuarioYColorLocal_() {
-  appState.activeUser = localStorage.getItem('userActive') || 'Brian';
+  appState.activeUser = normalizarUsuarioLocal_(localStorage.getItem('userActive'), 'Brian');
   aplicarPaletaUsuario_(appState.activeUser);
   pintarBotonesUsuario_();
 }
@@ -997,10 +1205,11 @@ function pintarBotonesUsuario_() {
 }
 
 function setActiveUser(user) {
+  const validUser = normalizarUsuarioLocal_(user, 'Brian');
   resetTxForm_();
-  appState.activeUser = user;
-  localStorage.setItem('userActive', user);
-  aplicarPaletaUsuario_(user);
+  appState.activeUser = validUser;
+  localStorage.setItem('userActive', validUser);
+  aplicarPaletaUsuario_(validUser);
   pintarBotonesUsuario_();
   renderMicroView();
 }
@@ -1170,7 +1379,7 @@ function renderTransactionList_() {
     const badge = resolverBadgeUsuario_(m.usuario);
     const safeId = escapeHtml_(m.id);
 
-    return '<button onclick="toggleModal(true, \'' + safeId + '\')" class="w-full flex items-center justify-between text-left py-2 border-b border-white/10 hover:opacity-90 active:opacity-80 transition-opacity">' +
+    return '<button type="button" data-tx-id="' + safeId + '" class="w-full flex items-center justify-between text-left py-2 border-b border-white/10 hover:opacity-90 active:opacity-80 transition-opacity">' +
       '<div class="flex items-center gap-3">' +
       '<div class="w-8 h-8 rounded-full bg-white font-avatar font-bold text-sm flex items-center justify-center shrink-0" style="color: ' + badge.color + ';">' + badge.letter + '</div>' +
       '<div>' +
@@ -1218,13 +1427,14 @@ function scrollDaysCarousel(delta, containerId = 'tx-days-carousel') {
   }
 }
 
-function renderDayPillHtml_(fechaISO, isActive, onclickExpr, extraClasses = '', strikeDay = false) {
+function renderDayPillHtml_(fechaISO, isActive, extraAttrs = '', extraClasses = '', strikeDay = false) {
   const partes = String(fechaISO).split('-').map(Number);
   const dObj = new Date(partes[0], partes[1] - 1, partes[2]);
   const nombreDia = DIAS_SEMANA_CORTOS_[dObj.getDay()];
   const numDia = partes[2];
   const cls = 'day-pill ' + (isActive ? 'active' : 'inactive') + (extraClasses ? ' ' + extraClasses : '');
-  return '<button type="button" onclick="' + onclickExpr + '" aria-pressed="' + (isActive ? 'true' : 'false') + '" class="' + cls + '">' +
+  const attrs = extraAttrs ? (' ' + extraAttrs) : '';
+  return '<button type="button"' + attrs + ' aria-pressed="' + (isActive ? 'true' : 'false') + '" class="' + cls + '">' +
     '<span class="text-[11px] font-bold">' + nombreDia + '</span>' +
     '<span class="text-base font-black leading-tight' + (strikeDay ? ' line-through' : '') + '">' + numDia + '</span>' +
     '</button>';
@@ -1302,7 +1512,7 @@ function renderHbExcludedDaysSelector_() {
   const prevScroll = listEl.scrollLeft || 0;
   listEl.innerHTML = elegibles.map(f => {
     const isExcluded = exclSet.has(f);
-    return renderDayPillHtml_(f, isExcluded, "event.stopPropagation(); toggleHbExcludedDay_('" + f + "')", '', isExcluded);
+    return renderDayPillHtml_(f, isExcluded, 'data-hb-day="' + escapeHtml_(f) + '"', '', isExcluded);
   }).join('');
   listEl.scrollLeft = prevScroll;
 }
@@ -1666,15 +1876,20 @@ async function resolveDayChange(decision) {
     cierreDiaPendiente = null;
     await recargarEstadoDiario_(false);
   } catch (e) {
-    showAppToast('Error al cerrar el día', true);
+    if (!isAuthError_(e)) {
+      showAppToast('Error al cerrar el día', true);
+    }
   } finally {
     ocultarSyncToast_();
   }
 }
 
-// ============================================================
-// MODAL "REGISTRAR MOVIMIENTO" (ÚNICO / DIVISIBLE)
-// ============================================================
+function generarIdMovimientoLocal_() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return 'tx_' + crypto.randomUUID();
+  }
+  return 'tx_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+}
 
 let isExplicitEditingTx_ = false;
 
@@ -1784,7 +1999,7 @@ function renderTxDaysCarousel_() {
     return renderDayPillHtml_(
       f,
       isSelected,
-      "event.stopPropagation(); selectTxDay_('" + f + "')",
+      'data-tx-day="' + escapeHtml_(f) + '"',
       isExcl && !isSelected ? 'is-excluded-hint' : '',
       isExcl
     );
@@ -2017,7 +2232,7 @@ async function handleFormSubmit() {
   toggleModal(false);
 
   // Update Optimista
-  const idMov = idToSave || ('tx_' + Date.now());
+  const idMov = idToSave || generarIdMovimientoLocal_();
   const nuevoMov = {
     id: idMov,
     tipo: subtypeToSave,
@@ -2049,7 +2264,7 @@ async function handleFormSubmit() {
   const disponibleHoyTexto = formatearMoneda_(presupuestoParaFecha_(hoyISO_()));
 
   callBackendBackground('guardarMovimiento', {
-    id: idToSave,
+    id: idMov,
     tipo: subtypeToSave,
     fechasAfectadas: fechasAfectadas,
     monto: monto,
@@ -2058,7 +2273,9 @@ async function handleFormSubmit() {
     actorUsuario: appState.activeUser,
     fromBag: fromBag,
     disponibleHoyTexto: disponibleHoyTexto
-  }).then(() => recargarEstadoDiario_(false));
+  })
+    .then(() => recargarEstadoDiario_(false))
+    .catch(err => console.error('Error sincronizando movimiento:', err));
 }
 
 async function deleteCurrentEditingTransaction() {
@@ -2083,7 +2300,8 @@ async function deleteCurrentEditingTransaction() {
     usuario: appState.activeUser,
     disponibleHoyTexto: disponibleHoyTexto
   })
-    .then(() => recargarEstadoDiario_(false));
+    .then(() => recargarEstadoDiario_(false))
+    .catch(err => console.error('Error sincronizando eliminación de movimiento:', err));
 }
 
 // ============================================================
@@ -2122,7 +2340,7 @@ function openBudgetAuditModal(targetDay) {
       const badge = resolverBadgeUsuario_(m.usuario);
       const safeId = escapeHtml_(m.id);
       const safeDesc = escapeHtml_(m.descripcion || (m.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único'));
-      return '<div class="flex justify-between items-baseline py-2.5 border-b border-white/10 cursor-pointer hover:opacity-90 transition-opacity" onclick="toggleBudgetAuditModal(false); toggleModal(true, \'' + safeId + '\')">' +
+      return '<div class="flex justify-between items-baseline py-2.5 border-b border-white/10 cursor-pointer hover:opacity-90 transition-opacity" data-audit-tx-id="' + safeId + '" role="button" tabindex="0">' +
         '<div>' +
         '<p class="text-sm font-bold text-[#d31818]">' + safeDesc + ': -' + formatearMoneda_(m.montoPorFecha) + '</p>' +
         '<p class="text-[11px] text-white/80 mt-1 flex items-center gap-1.5">' +
@@ -2216,7 +2434,7 @@ function renderFutureDaysList_() {
     let detalle = '';
     if (movs.length) {
       detalle = '<div class="mt-1 space-y-1">' +
-        movs.map(m => '<button onclick="event.stopPropagation(); toggleFutureDaysModal(false); toggleModal(true, \'' + escapeHtml_(m.id) + '\')" class="w-full flex justify-between text-xs text-white/80 hover:text-white p-1 rounded transition-colors text-left">' +
+        movs.map(m => '<button type="button" data-future-tx-id="' + escapeHtml_(m.id) + '" class="w-full flex justify-between text-xs text-white/80 hover:text-white p-1 rounded transition-colors text-left">' +
           '<span>• ' + escapeHtml_(m.descripcion || 'Gasto') + '</span><span class="font-bold text-[#d31818]">-' + formatearMoneda_(m.montoPorFecha) + '</span></button>').join('') +
         '</div>';
     }
@@ -2282,7 +2500,7 @@ function closeAllActiveModalsWithoutSaving_() {
 
   const activeModals = document.querySelectorAll('.modal-overlay.active, .modal.active');
   activeModals.forEach(m => {
-    if (m && m.id !== 'day-change-modal') m.classList.remove('active');
+    if (m && m.id !== 'day-change-modal' && m.id !== 'access-key-modal') m.classList.remove('active');
   });
 
   const microDash = document.getElementById('micro-dashboard-view');
@@ -2316,7 +2534,7 @@ function closeTopActiveLayer_() {
   }
 
   const activeOverlays = Array.from(document.querySelectorAll('.modal-overlay.active, .modal.active'));
-  const closable = activeOverlays.filter(m => m && m.id !== 'day-change-modal');
+  const closable = activeOverlays.filter(m => m && m.id !== 'day-change-modal' && m.id !== 'access-key-modal');
   if (closable.length) {
     const top = closable[closable.length - 1];
     if (top.id && closers[top.id]) {
@@ -2329,8 +2547,8 @@ function closeTopActiveLayer_() {
     return;
   }
 
-  // No descartar #day-change-modal con Back sin que el usuario elija una opción
-  if (activeOverlays.some(m => m && m.id === 'day-change-modal')) {
+  // No descartar #day-change-modal ni #access-key-modal con Back
+  if (activeOverlays.some(m => m && (m.id === 'day-change-modal' || m.id === 'access-key-modal'))) {
     return;
   }
 
@@ -2608,6 +2826,7 @@ function updateFloatingCircleButtonsPosition() {
 
   syncModalOverlayToViewport_('message-modal', 'message-modal-card', vvHeight, vvOffsetTop, isKeyboardOpen);
   syncModalOverlayToViewport_('shopping-modal', 'shopping-modal-card', vvHeight, vvOffsetTop, isKeyboardOpen);
+  syncModalOverlayToViewport_('access-key-modal', 'access-key-modal-card', vvHeight, vvOffsetTop, isKeyboardOpen);
 
   if (isKeyboardOpen && document.activeElement && document.activeElement.id === 'msg-custom-input') {
     ensureMessageModalSendVisible_();
@@ -2710,34 +2929,62 @@ function autoFitCircleButtons() {
 
 let diarioLoadToken_ = 0;
 
+function normalizarDiasRestantesLocal_(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  raw.forEach(f => {
+    const iso = String(f || '').trim();
+    if (esFechaCalendarioValidaLocal_(iso) && !seen.has(iso)) {
+      seen.add(iso);
+      out.push(iso);
+    }
+  });
+  return out.sort();
+}
+
+function normalizarMovimientosLocal_(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(m => m && typeof m === 'object')
+    .map(m => Object.assign({}, m, {
+      monto: Number.isFinite(Number(m.monto)) ? Number(m.monto) : 0,
+      montoPorFecha: Number.isFinite(Number(m.montoPorFecha)) ? Number(m.montoPorFecha) : 0,
+      fechasAfectadas: normalizarFechas_(m.fechasAfectadas),
+      usuario: normalizarUsuarioLocal_(m.usuario, appState.activeUser || 'Brian'),
+      fromBag: !!m.fromBag
+    }));
+}
+
 function cargarCacheDiarioLocal_() {
   const cached = localStorage.getItem('cached_diario_state');
   if (!cached) return false;
   const parsed = JSON.parse(cached);
-  if (!parsed || typeof parsed !== 'object') return false;
-  if (parsed.homeBankingTotal !== undefined) appState.homeBankingTotal = parsed.homeBankingTotal;
-  if (parsed.bolsaTotal !== undefined) appState.bolsaTotal = parsed.bolsaTotal;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (parsed.homeBankingTotal !== undefined && Number.isFinite(Number(parsed.homeBankingTotal))) {
+    appState.homeBankingTotal = Number(parsed.homeBankingTotal);
+  }
+  if (parsed.bolsaTotal !== undefined && Number.isFinite(Number(parsed.bolsaTotal))) {
+    appState.bolsaTotal = Number(parsed.bolsaTotal);
+  }
   if (parsed.diaCobro !== undefined) appState.diaCobro = parsed.diaCobro;
-  if (Array.isArray(parsed.diasRestantes)) appState.diasRestantes = parsed.diasRestantes;
+  if (Array.isArray(parsed.diasRestantes)) appState.diasRestantes = normalizarDiasRestantesLocal_(parsed.diasRestantes);
   if (Array.isArray(parsed.diasExcluidos)) appState.diasExcluidos = normalizarDiasExcluidosLocal_(parsed.diasExcluidos);
-  if (Array.isArray(parsed.movimientos)) appState.movimientos = parsed.movimientos;
+  if (Array.isArray(parsed.movimientos)) appState.movimientos = normalizarMovimientosLocal_(parsed.movimientos);
   if (Array.isArray(parsed.listaCompras)) appState.listaCompras = normalizarListaCompras_(parsed.listaCompras);
-  if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = parsed.lastProcessedDate;
+  if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = normalizarFechaConfig_(parsed.lastProcessedDate, hoyISO_());
   if (parsed.whatsappConfigured !== undefined) appState.whatsappConfigured = !!parsed.whatsappConfigured;
   return true;
 }
 
 function aplicarEstadoDiario_(data) {
-  if (!data) return;
-  appState.homeBankingTotal = data.homeBankingTotal;
-  appState.bolsaTotal = data.bolsaTotal;
+  if (!data || typeof data !== 'object') return;
+  if (Number.isFinite(Number(data.homeBankingTotal))) appState.homeBankingTotal = Number(data.homeBankingTotal);
+  if (Number.isFinite(Number(data.bolsaTotal))) appState.bolsaTotal = Number(data.bolsaTotal);
   appState.diaCobro = data.diaCobro;
-  appState.diasRestantes = data.diasRestantes;
+  appState.diasRestantes = normalizarDiasRestantesLocal_(data.diasRestantes);
   appState.diasExcluidos = normalizarDiasExcluidosLocal_(data.diasExcluidos);
-  appState.movimientos = (data.movimientos || []).map(m => {
-    m.fechasAfectadas = normalizarFechas_(m.fechasAfectadas);
-    return m;
-  });
+  appState.movimientos = normalizarMovimientosLocal_(data.movimientos);
   if (Array.isArray(data.listaCompras)) {
     appState.listaCompras = normalizarListaCompras_(data.listaCompras);
   }
@@ -2754,7 +3001,7 @@ function aplicarEstadoDiario_(data) {
 }
 
 async function recargarEstadoDiario_(conToast) {
-  if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
+  if (authPaused_ || !getStoredAccessKey_() || pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
   const miToken = ++diarioLoadToken_;
   try {
     if (!appState.lastProcessedDate && miToken === diarioLoadToken_ && cargarCacheDiarioLocal_()) {
@@ -2782,9 +3029,20 @@ async function bootstrapEstado_() {
     }
   } catch (e) {}
 
+  if (!getStoredAccessKey_()) {
+    authPaused_ = true;
+    openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar.');
+    return;
+  }
+
+  if (getPendingSyncQueue_().length > 0) {
+    await processPendingSyncQueue_();
+    if (authPaused_ || getPendingSyncQueue_().length > 0) return;
+  }
+
   try {
     const data = await callBackendConSync('getEstadoDiario', {});
-    if (miToken !== diarioLoadToken_) return;
+    if (miToken !== diarioLoadToken_ || authPaused_ || getPendingSyncQueue_().length > 0) return;
     aplicarEstadoDiario_(data);
 
     try {
@@ -2797,9 +3055,6 @@ async function bootstrapEstado_() {
       console.error('Error en bootstrapEstado_:', err);
     }
   }
-
-  // Procesar cualquier sincronización pendiente almacenada en cola
-  processPendingSyncQueue_();
 }
 
 window.diagnosticarBackend = async function() {
@@ -2840,17 +3095,26 @@ window.exportarRespaldoEstado = function() {
     respaldo.cachedDiarioState = localStorage.getItem('cached_diario_state');
   }
 
+  const BACKUP_STORAGE_ALLOWLIST = [
+    'userActive',
+    'userPalette_Brian',
+    'userPalette_Virginia',
+    'userPaletteVars_Brian',
+    'userPaletteVars_Virginia',
+    'cached_diario_state',
+    'pending_sync_queue'
+  ];
+
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key) {
-        try {
-          respaldo.localStorage[key] = JSON.parse(localStorage.getItem(key));
-        } catch (e) {
-          respaldo.localStorage[key] = localStorage.getItem(key);
-        }
+    BACKUP_STORAGE_ALLOWLIST.forEach(key => {
+      const rawVal = localStorage.getItem(key);
+      if (rawVal === null) return;
+      try {
+        respaldo.localStorage[key] = JSON.parse(rawVal);
+      } catch (e) {
+        respaldo.localStorage[key] = rawVal;
       }
-    }
+    });
   } catch (e) {
     console.warn('Error al recolectar localStorage para respaldo:', e);
   }
@@ -2984,7 +3248,10 @@ async function enviarMensajePareja() {
     }
     return true;
   } catch (err) {
-    if (isNetworkOrTimeoutError_(err)) {
+    if (isAuthError_(err)) {
+      return false;
+    }
+    if (isRetryableBackendError_(err)) {
       callBackendBackground('enviarMensaje', payload);
       finalizarEnvioUI();
       return true;
@@ -3022,13 +3289,16 @@ async function enviarListaComprasWhatsApp() {
     if (wa && wa.sent) {
       showAppToast('🛒 Lista de compras enviada al grupo de WhatsApp');
     } else if (wa && wa.reason === 'missing_greenapi_config') {
-      showAppToast('Falta configurar Green API en la hoja Config', true);
+      showAppToast('Falta configurar Green API', true);
     } else {
       showAppToast('No se pudo enviar al grupo de WhatsApp', true);
     }
     return true;
   } catch (err) {
-    if (isNetworkOrTimeoutError_(err)) {
+    if (isAuthError_(err)) {
+      return false;
+    }
+    if (isRetryableBackendError_(err)) {
       callBackendBackground('enviarListaComprasWhatsApp', payload);
       closeMessageModal();
       return true;
@@ -3046,6 +3316,10 @@ async function enviarListaComprasWhatsApp() {
 function solicitarRecargaSuave_() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (pendingSyncCount === 0 && getPendingSyncQueue_().length > 0 && !isProcessingSyncQueue_ && !authPaused_ && getStoredAccessKey_()) {
+    processPendingSyncQueue_();
+    return;
+  }
   if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0 || isReloadingDiario_) return;
   const now = Date.now();
   if (now - lastAutoReloadTs_ < 8000) return;
@@ -3149,12 +3423,12 @@ function renderShoppingList_() {
     const safeTexto = escapeHtml_(it.texto);
     const autorBadge = resolverBadgeUsuario_(it.autor);
     return '<div class="shopping-item-row' + (it.done ? ' done' : '') + '">' +
-      '<button type="button" onclick="toggleItemListaCompras(\'' + safeId + '\')" class="flex items-center gap-2.5 flex-1 min-w-0 text-left">' +
+      '<button type="button" data-toggle-shop-id="' + safeId + '" class="flex items-center gap-2.5 flex-1 min-w-0 text-left">' +
         '<span class="shopping-check-circle" aria-hidden="true">' + (it.done ? '✓' : '') + '</span>' +
         '<span class="shopping-item-text flex-1 min-w-0">' + safeTexto + '</span>' +
       '</button>' +
       '<span class="w-5 h-5 rounded-full bg-white border border-zinc-200 font-avatar font-bold text-[10px] flex items-center justify-center shrink-0" style="color: ' + autorBadge.color + ';" title="' + escapeHtml_(autorBadge.user) + '">' + autorBadge.letter + '</span>' +
-      '<button type="button" onclick="eliminarItemListaCompras(\'' + safeId + '\')" class="text-zinc-400 hover:text-rose-600 text-xs font-bold px-1.5 py-1 shrink-0" aria-label="Eliminar ítem">✕</button>' +
+      '<button type="button" data-delete-shop-id="' + safeId + '" class="text-zinc-400 hover:text-rose-600 text-xs font-bold px-1.5 py-1 shrink-0" aria-label="Eliminar ítem">✕</button>' +
     '</div>';
   }).join('');
 
@@ -3265,6 +3539,203 @@ if (typeof history !== 'undefined' && 'scrollRestoration' in history) {
   try { history.scrollRestoration = 'manual'; } catch (e) {}
 }
 
+let isUiDelegationBound_ = false;
+let isSwRegistered_ = false;
+
+function dispatchUiAction_(action, arg, triggerEl) {
+  const handlers = {
+    'open-shopping-modal': () => openShoppingModal(),
+    'open-message-modal': () => openMessageModal(),
+    'open-budget-audit': () => openBudgetAuditModal(arg),
+    'open-hb-modal': () => toggleHbModal(true),
+    'open-future-days-modal': () => toggleFutureDaysModal(true),
+    'set-micro-subview': () => setMicroSubView(arg),
+    'set-tx-subtype': () => setTxSubtype(arg),
+    'scroll-days-carousel': () => scrollDaysCarousel(Number(arg)),
+    'scroll-hb-days-carousel': () => scrollDaysCarousel(Number(arg), 'hb-excluded-days-list'),
+    'delete-editing-tx': () => deleteCurrentEditingTransaction(),
+    'submit-tx-form': () => handleFormSubmit(),
+    'vaciar-bolsa-ahorro': () => handleVaciarBolsaAhorro(),
+    'close-hb-modal': () => toggleHbModal(false),
+    'save-hb-amount': () => saveHbAmount(),
+    'close-budget-audit': () => toggleBudgetAuditModal(false),
+    'close-future-days-modal': () => toggleFutureDaysModal(false),
+    'resolve-day-change': () => resolveDayChange(arg),
+    'close-palette-modal': () => closePaletteModal(),
+    'close-message-modal': () => closeMessageModal(),
+    'select-quick-msg': () => seleccionarMensajeRapido(Number(arg)),
+    'send-quick-msg': () => enviarMensajeRapido(Number(arg)),
+    'send-shopping-whatsapp': () => enviarListaComprasWhatsApp(),
+    'send-custom-msg': () => enviarMensajePareja(),
+    'close-shopping-modal': () => closeShoppingModal(),
+    'add-shopping-item': () => agregarItemListaCompras(),
+    'clear-checked-shopping': () => limpiarCompradosListaCompras(),
+    'handle-bag-checkbox': () => handleBagCheckbox(triggerEl)
+  };
+  if (handlers[action]) handlers[action]();
+}
+
+function initUiEventDelegation_() {
+  if (isUiDelegationBound_) return;
+  isUiDelegationBound_ = true;
+
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!target || typeof target.closest !== 'function') return;
+
+    const backdropEl = target.closest('[data-backdrop-close]');
+    if (backdropEl && e.target === backdropEl) {
+      const kind = backdropEl.getAttribute('data-backdrop-close');
+      if (kind === 'palette') closePaletteModal();
+      else if (kind === 'message') closeMessageModal();
+      else if (kind === 'shopping') closeShoppingModal();
+      return;
+    }
+
+    const stopPropEl = target.closest('[data-stop-prop="true"]');
+    if (stopPropEl) {
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    }
+
+    const hbPill = target.closest('[data-hb-day]');
+    if (hbPill) {
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      toggleHbExcludedDay_(hbPill.getAttribute('data-hb-day'));
+      return;
+    }
+
+    const txPill = target.closest('[data-tx-day]');
+    if (txPill) {
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      selectTxDay_(txPill.getAttribute('data-tx-day'));
+      return;
+    }
+
+    const paletteBtn = target.closest('[data-palette-id]');
+    if (paletteBtn) {
+      seleccionarPaletaUsuario(paletteBtn.getAttribute('data-palette-id'));
+      return;
+    }
+
+    const txItemBtn = target.closest('[data-tx-id]');
+    if (txItemBtn) {
+      toggleModal(true, txItemBtn.getAttribute('data-tx-id'));
+      return;
+    }
+
+    const auditTxEl = target.closest('[data-audit-tx-id]');
+    if (auditTxEl) {
+      toggleBudgetAuditModal(false);
+      toggleModal(true, auditTxEl.getAttribute('data-audit-tx-id'));
+      return;
+    }
+
+    const futureTxEl = target.closest('[data-future-tx-id]');
+    if (futureTxEl) {
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+      toggleFutureDaysModal(false);
+      toggleModal(true, futureTxEl.getAttribute('data-future-tx-id'));
+      return;
+    }
+
+    const toggleShopEl = target.closest('[data-toggle-shop-id]');
+    if (toggleShopEl) {
+      toggleItemListaCompras(toggleShopEl.getAttribute('data-toggle-shop-id'));
+      return;
+    }
+
+    const delShopEl = target.closest('[data-delete-shop-id]');
+    if (delShopEl) {
+      eliminarItemListaCompras(delShopEl.getAttribute('data-delete-shop-id'));
+      return;
+    }
+
+    const emojiBtn = target.closest('[data-emoji]');
+    if (emojiBtn) {
+      insertEmoji(emojiBtn.getAttribute('data-emoji'));
+      return;
+    }
+
+    const actionEl = target.closest('[data-action]');
+    if (actionEl) {
+      if (actionEl.tagName === 'INPUT' && actionEl.type === 'checkbox') return;
+      dispatchUiAction_(actionEl.getAttribute('data-action'), actionEl.getAttribute('data-arg'), actionEl);
+    }
+  });
+
+  document.addEventListener('change', (e) => {
+    const target = e.target;
+    if (!target || typeof target.matches !== 'function') return;
+    if (target.matches('[data-action="handle-bag-checkbox"]')) {
+      handleBagCheckbox(target);
+    }
+  });
+
+  document.addEventListener('input', (e) => {
+    const target = e.target;
+    if (!target || typeof target.matches !== 'function') return;
+    if (target.matches('[data-capitalize="true"]')) {
+      capitalizeInput(target);
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target;
+    if (!target || typeof target.closest !== 'function') return;
+    const auditTxEl = target.closest('[data-audit-tx-id]');
+    if (auditTxEl) {
+      e.preventDefault();
+      toggleBudgetAuditModal(false);
+      toggleModal(true, auditTxEl.getAttribute('data-audit-tx-id'));
+    }
+  });
+
+  const accessForm = document.getElementById('access-key-form');
+  if (accessForm) {
+    accessForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitAccessKeyForm_();
+    });
+  }
+}
+
+function initServiceWorkerRegistration_() {
+  if (isSwRegistered_) return;
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  isSwRegistered_ = true;
+
+  const registerSw = () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => {
+        console.log('Service Worker registrado con éxito con alcance:', reg.scope);
+      })
+      .catch(err => {
+        console.error('Error al registrar Service Worker:', err);
+      });
+  };
+
+  if (typeof document !== 'undefined' && document.readyState === 'complete') {
+    registerSw();
+  } else if (typeof window !== 'undefined') {
+    window.addEventListener('load', registerSw);
+  }
+
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    const keyModal = document.getElementById('access-key-modal');
+    if (keyModal && keyModal.classList.contains('active')) return;
+    if (!refreshing) {
+      refreshing = true;
+      window.location.reload();
+    }
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const splashEl = document.getElementById('app-splash-screen');
   if (splashEl) {
@@ -3281,10 +3752,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.persist === 'function') {
     navigator.storage.persist().catch(() => {});
   }
+  initUiEventDelegation_();
   initAvatarLongPress_();
   initOutsideCardTapToClose_();
   initHorizontalSwipeGesture_();
   initAndroidBackHistory_();
+  initServiceWorkerRegistration_();
   autoFitCircleButtons();
   actualizarBadgeListaCompras_();
   initAutoSyncRefresh_();

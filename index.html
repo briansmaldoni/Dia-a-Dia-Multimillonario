@@ -6,6 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Dia a Dia Multimillonarios</title>
 
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self';">
+
   <!-- Vinculación PWA Standalone -->
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#536460">
@@ -23,34 +26,11 @@
     href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,300;0,400;0,500;0,700;0,800;0,900;1,400;1,700&family=Zilla+Slab:wght@700&display=swap"
     rel="stylesheet">
 
-  <!-- Script anti-parpadeo de sesión y paleta -->
-  <script>
-    (function () {
-      const activeUser = localStorage.getItem('userActive') || 'Brian';
-      window.__initialUser = activeUser;
-      try {
-        const rawVars = localStorage.getItem('userPaletteVars_' + activeUser);
-        if (rawVars) {
-          const vars = JSON.parse(rawVars);
-          if (vars && typeof vars === 'object') {
-            const root = document.documentElement;
-            Object.keys(vars).forEach(function (k) {
-              root.style.setProperty(k, vars[k]);
-            });
-            const metas = document.querySelectorAll('meta[name="theme-color"]');
-            if (vars['--color-primary']) {
-              metas.forEach(function (meta) {
-                meta.setAttribute('content', vars['--color-primary']);
-              });
-            }
-          }
-        }
-      } catch (e) {}
-    })();
-  </script>
+  <!-- Script externo anti-parpadeo de sesión y paleta -->
+  <script src="theme-boot.js"></script>
 
-  <!-- Tailwind CSS CDN para utilidades de maquetación -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind CSS precompilado localmente (cero CDN) -->
+  <link rel="stylesheet" href="tailwind.min.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -80,21 +60,15 @@
       <div class="flex-1 min-w-0 min-h-[44px] flex items-center">
         <h1 id="nav-title-text" class="text-2xl sm:text-3xl font-bold tracking-tight select-none whitespace-nowrap">Hola, Brian</h1>
       </div>
-      <script>
-        (function () {
-          var t = document.getElementById('nav-title-text');
-          if (t && window.__initialUser) t.textContent = 'Hola, ' + window.__initialUser;
-        })();
-      </script>
 
       <!-- Avatares de Usuario (Brian & Virginia) -->
       <div class="flex flex-col items-end shrink-0">
         <div class="flex items-center gap-1.5 sm:gap-2">
-          <button id="btn-open-shopping-modal" type="button" onclick="openShoppingModal()" class="msg-header-btn" title="Lista de compras" aria-label="Lista de compras">
+          <button id="btn-open-shopping-modal" type="button" data-action="open-shopping-modal" class="msg-header-btn" title="Lista de compras" aria-label="Lista de compras">
             <span aria-hidden="true">🛒</span>
             <span id="shopping-pending-badge" class="shopping-pending-badge hidden">0</span>
           </button>
-          <button id="btn-open-msg-modal" type="button" onclick="openMessageModal()" class="msg-header-btn" title="Enviar mensajito al grupo de WhatsApp" aria-label="Enviar mensajito al grupo de WhatsApp">
+          <button id="btn-open-msg-modal" type="button" data-action="open-message-modal" class="msg-header-btn" title="Enviar mensajito al grupo de WhatsApp" aria-label="Enviar mensajito al grupo de WhatsApp">
             <span aria-hidden="true">💌</span>
           </button>
           <button id="user-btn-brian" type="button" data-user="Brian" class="avatar-btn active" title="Brian (mantené presionado para elegir paleta)">
@@ -123,7 +97,7 @@
             <span class="text-xs font-black tracking-wider uppercase text-white/90 block mb-1">
               PRESUPUESTO DEL DÍA
             </span>
-            <div onclick="openBudgetAuditModal('today')"
+            <div data-action="open-budget-audit" data-arg="today"
               class="cursor-pointer select-none active:opacity-80 transition-opacity">
               <h1 id="today-budget-display"
                 class="text-[52px] sm:text-[60px] font-bold text-white tracking-tight leading-none mb-2">
@@ -131,7 +105,7 @@
               </h1>
             </div>
 
-            <div onclick="openBudgetAuditModal('tomorrow')"
+            <div data-action="open-budget-audit" data-arg="tomorrow"
               class="cursor-pointer select-none active:opacity-80 transition-opacity">
               <p class="text-sm font-bold theme-text-muted">
                 Presupuesto para mañana: <span id="tomorrow-budget-display" class="theme-text-muted">$ 0,00</span>
@@ -145,7 +119,7 @@
 
           <!-- SALDO DISPONIBLE & AHORROS -->
           <section class="space-y-1.5 mb-2">
-            <div onclick="toggleHbModal(true)"
+            <div data-action="open-hb-modal"
               class="cursor-pointer select-none hover:opacity-90 active:opacity-80 transition-opacity">
               <p class="text-base font-bold text-white">
                 SALDO DISPONIBLE: <span id="hb-total-display">$ 0,00</span>
@@ -153,13 +127,13 @@
             </div>
 
             <div class="flex justify-between items-baseline pt-1">
-              <div onclick="toggleHbModal(true)"
+              <div data-action="open-hb-modal"
                 class="cursor-pointer select-none hover:opacity-90 active:opacity-80 transition-opacity">
                 <p class="text-base font-bold text-white">
                   AHORROS: <span id="savings-bag-display">$ 0,00</span>
                 </p>
               </div>
-              <button onclick="toggleFutureDaysModal(true)"
+              <button data-action="open-future-days-modal"
                 class="text-sm font-bold theme-text-muted hover:underline focus:outline-none">
                 Próximos días
               </button>
@@ -171,11 +145,11 @@
 
           <!-- PESTAÑAS DE MOVIMIENTOS -->
           <div class="flex items-center justify-around border-b border-white/20 pb-2 mb-3">
-            <button id="tab-movs-list" onclick="setMicroSubView('list')"
+            <button id="tab-movs-list" data-action="set-micro-subview" data-arg="list"
               class="px-3 py-1 text-xs font-black tracking-wider text-white border-b-2 border-white focus:outline-none uppercase text-center">
               GASTOS
             </button>
-            <button id="tab-movs-add" onclick="setMicroSubView('add')"
+            <button id="tab-movs-add" data-action="set-micro-subview" data-arg="add"
               class="px-3 py-1 text-xs font-normal tracking-wider text-white/70 hover:text-white focus:outline-none uppercase text-center">
               NUEVO GASTO
             </button>
@@ -191,11 +165,11 @@
             <div class="space-y-4">
               <!-- Selector ÚNICO / DIVISIBLE -->
               <div class="flex items-center justify-around border-b border-white/20 pb-2">
-                <button id="tab-single" type="button" onclick="setTxSubtype('single')"
+                <button id="tab-single" type="button" data-action="set-tx-subtype" data-arg="single"
                   class="px-3 py-1 text-sm font-black text-white focus:outline-none border-b-2 border-white">
                   ÚNICO
                 </button>
-                <button id="tab-divisible" type="button" onclick="setTxSubtype('divisible')"
+                <button id="tab-divisible" type="button" data-action="set-tx-subtype" data-arg="divisible"
                   class="px-3 py-1 text-sm font-normal text-white/70 hover:text-white focus:outline-none">
                   DIVISIBLE
                 </button>
@@ -214,14 +188,14 @@
                   class="w-7 h-7 rounded-full bg-white theme-text-primary font-avatar font-bold text-sm flex items-center justify-center shrink-0">
                   <span id="modal-user-label">B</span>
                 </div>
-                <input id="tx-desc" type="text" placeholder="Ej: Cena, Merienda" oninput="capitalizeInput(this)"
+                <input id="tx-desc" type="text" maxlength="200" placeholder="Ej: Cena, Merienda" data-capitalize="true"
                   class="input-figma-dark text-base font-bold text-white placeholder-white/50">
               </div>
 
               <!-- Carrusel de Días para Asignar Fecha -->
               <div class="space-y-1.5 pt-1">
                 <div class="flex items-center justify-between gap-1 py-1">
-                  <button type="button" onclick="scrollDaysCarousel(-1)" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día anterior">
+                  <button type="button" data-action="scroll-days-carousel" data-arg="-1" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día anterior">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"></path>
                     </svg>
@@ -230,7 +204,7 @@
                     id="tx-days-carousel">
                     <!-- Se llena dinámicamente según días restantes -->
                   </div>
-                  <button type="button" onclick="scrollDaysCarousel(1)" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día siguiente">
+                  <button type="button" data-action="scroll-days-carousel" data-arg="1" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día siguiente">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"></path>
                     </svg>
@@ -251,7 +225,7 @@
               <!-- Toggle Usar Ahorros -->
               <div class="flex items-center gap-3 pt-2">
                 <label class="flex items-center gap-3 cursor-pointer">
-                  <input id="chk-from-bag" type="checkbox" onchange="handleBagCheckbox(this)"
+                  <input id="chk-from-bag" type="checkbox" data-action="handle-bag-checkbox"
                     class="w-5 h-5 rounded-full accent-white theme-text-primary">
                   <span class="text-sm font-normal text-white select-none">Pagar con ahorros</span>
                 </label>
@@ -260,7 +234,7 @@
 
             <!-- Botones de Acción Inferiores -->
             <div class="floating-actions-bar">
-              <button type="button" onclick="setMicroSubView('list')" class="btn-circle btn-circle-white" title="Volver">
+              <button type="button" data-action="set-micro-subview" data-arg="list" class="btn-circle btn-circle-white" title="Volver">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18">
                   </path>
@@ -268,11 +242,11 @@
               </button>
 
               <div class="flex items-center gap-2.5">
-                <button id="btn-delete-tx" type="button" onclick="deleteCurrentEditingTransaction()"
+                <button id="btn-delete-tx" type="button" data-action="delete-editing-tx"
                   class="hidden btn-circle btn-circle-white text-xs text-rose-700">
                   Eliminar
                 </button>
-                <button id="btn-save-tx" type="button" onclick="handleFormSubmit()"
+                <button id="btn-save-tx" type="button" data-action="submit-tx-form"
                   class="btn-circle btn-circle-white text-xs">
                   <span id="btn-save-tx-label" class="text-2xl font-light leading-none">+</span>
                 </button>
@@ -318,7 +292,7 @@
                 <p class="text-[11px] theme-text-muted opacity-85">
                   Opcional: editalo solo si querés cambiar tus ahorros.
                 </p>
-                <button type="button" id="btn-vaciar-bolsa" onclick="handleVaciarBolsaAhorro()"
+                <button type="button" id="btn-vaciar-bolsa" data-action="vaciar-bolsa-ahorro"
                   class="shrink-0 px-3 py-1.5 rounded-full bg-white/15 hover:bg-white/25 active:scale-95 text-white text-[11px] font-bold tracking-wide transition-all">
                   Vaciar ahorros
                 </button>
@@ -337,7 +311,7 @@
                 Tocá los días desde el 28 hasta antes de cobrar que no quieras incluir en el presupuesto diario.
               </p>
               <div class="flex items-center justify-between gap-1 py-1">
-                <button type="button" onclick="event.stopPropagation(); scrollDaysCarousel(-1, 'hb-excluded-days-list')" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día anterior">
+                <button type="button" data-action="scroll-hb-days-carousel" data-arg="-1" data-stop-prop="true" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día anterior">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"></path>
                   </svg>
@@ -345,7 +319,7 @@
                 <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 flex-1 min-w-0 days-carousel" id="hb-excluded-days-list">
                   <!-- Se llena dinámicamente con días desde el 28 hasta antes del cobro -->
                 </div>
-                <button type="button" onclick="event.stopPropagation(); scrollDaysCarousel(1, 'hb-excluded-days-list')" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día siguiente">
+                <button type="button" data-action="scroll-hb-days-carousel" data-arg="1" data-stop-prop="true" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día siguiente">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"></path>
                   </svg>
@@ -356,13 +330,13 @@
 
           <!-- Botones de Acción -->
           <div class="floating-actions-bar">
-            <button type="button" onclick="toggleHbModal(false)" class="btn-circle btn-circle-white" title="Volver">
+            <button type="button" data-action="close-hb-modal" class="btn-circle btn-circle-white" title="Volver">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18">
                 </path>
               </svg>
             </button>
-            <button type="button" id="btn-guardar-hb" onclick="saveHbAmount()" class="btn-circle btn-circle-white text-xs uppercase">
+            <button type="button" id="btn-guardar-hb" data-action="save-hb-amount" class="btn-circle btn-circle-white text-xs uppercase">
               Guardar
             </button>
           </div>
@@ -392,7 +366,7 @@
           </div>
 
           <div class="floating-actions-bar">
-            <button type="button" onclick="toggleBudgetAuditModal(false)" class="btn-circle btn-circle-white" title="Volver">
+            <button type="button" data-action="close-budget-audit" class="btn-circle btn-circle-white" title="Volver">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18">
                 </path>
@@ -412,7 +386,7 @@
           </div>
 
           <div class="floating-actions-bar">
-            <button type="button" onclick="toggleFutureDaysModal(false)" class="btn-circle btn-circle-white" title="Volver">
+            <button type="button" data-action="close-future-days-modal" class="btn-circle btn-circle-white" title="Volver">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18">
                 </path>
@@ -435,15 +409,15 @@
       <p id="day-change-desc" class="text-sm text-zinc-600 leading-relaxed"></p>
 
       <div class="space-y-3 pt-2">
-        <button id="day-change-btn-edit-hb" type="button" onclick="resolveDayChange('edit_hb')"
+        <button id="day-change-btn-edit-hb" type="button" data-action="resolve-day-change" data-arg="edit_hb"
           class="w-full py-3.5 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90">
           Actualizar saldo
         </button>
-        <button id="day-change-btn-bag" onclick="resolveDayChange('bag')"
+        <button id="day-change-btn-bag" data-action="resolve-day-change" data-arg="bag"
           class="w-full py-3.5 rounded-full border-2 theme-border-primary theme-text-primary font-bold text-sm tracking-wide hover:bg-black/5">
           Guardar en Ahorros
         </button>
-        <button id="day-change-btn-distribute" onclick="resolveDayChange('distribute')"
+        <button id="day-change-btn-distribute" data-action="resolve-day-change" data-arg="distribute"
           class="w-full py-3.5 rounded-full border-2 theme-border-primary theme-text-primary font-bold text-sm tracking-wide hover:bg-black/5">
           Repartir en los próximos días
         </button>
@@ -454,7 +428,7 @@
   <!-- ============================================================ -->
   <!-- MODAL FLOTANTE 2: SELECTOR DE PALETA DE COLORES POR USUARIO  -->
   <!-- ============================================================ -->
-  <div id="palette-modal" class="modal-overlay" onclick="if (event.target === this) closePaletteModal()">
+  <div id="palette-modal" class="modal-overlay" data-backdrop-close="palette">
     <div class="modal-sheet p-6 space-y-4">
       <div class="text-center space-y-1">
         <h3 id="palette-modal-title" class="text-lg font-black theme-text-primary">Paleta de Brian</h3>
@@ -464,7 +438,7 @@
       <div id="palette-options-grid" class="grid grid-cols-1 gap-2.5 max-h-[55vh] overflow-y-auto no-scrollbar py-1 px-0.5"></div>
 
       <div class="pt-1">
-        <button type="button" onclick="closePaletteModal()"
+        <button type="button" data-action="close-palette-modal"
           class="w-full py-3 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90">
           Listo
         </button>
@@ -473,36 +447,36 @@
   </div>
 
   <!-- MODAL: Mensajes al Grupo de WhatsApp -->
-  <div id="message-modal" class="modal-overlay" onclick="if (event.target === this) closeMessageModal()">
+  <div id="message-modal" class="modal-overlay" data-backdrop-close="message">
     <div id="message-modal-card" class="bg-white w-[92%] max-w-sm rounded-3xl p-5 shadow-2xl space-y-3.5 max-h-[88vh] overflow-y-auto no-scrollbar">
       <div class="flex justify-between items-start gap-2">
         <div>
           <h3 id="msg-modal-title" class="font-bold text-base text-zinc-900">💌 Enviar mensajito</h3>
           <p id="msg-modal-subtitle" class="text-[11px] text-zinc-500 mt-0.5">Se envía directo al grupo de WhatsApp con tu nombre</p>
         </div>
-        <button type="button" onclick="closeMessageModal()" class="text-zinc-400 hover:text-zinc-700 font-bold text-base px-1" aria-label="Cerrar mensajes">✕</button>
+        <button type="button" data-action="close-message-modal" class="text-zinc-400 hover:text-zinc-700 font-bold text-base px-1" aria-label="Cerrar mensajes">✕</button>
       </div>
 
       <!-- Mensajes predeterminados -->
       <div class="space-y-1.5">
         <p class="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Mensajes rápidos</p>
         <div class="preset-msg-card">
-          <button type="button" onclick="seleccionarMensajeRapido(0)" class="flex-1 text-left text-xs font-semibold text-zinc-800 pr-1">
+          <button type="button" data-action="select-quick-msg" data-arg="0" class="flex-1 text-left text-xs font-semibold text-zinc-800 pr-1">
             Te amo mucho ❤️
           </button>
-          <button type="button" onclick="enviarMensajeRapido(0)" class="shrink-0 px-3 py-1.5 rounded-full theme-bg-primary text-white text-[11px] font-bold shadow-sm hover:opacity-90">
+          <button type="button" data-action="send-quick-msg" data-arg="0" class="shrink-0 px-3 py-1.5 rounded-full theme-bg-primary text-white text-[11px] font-bold shadow-sm hover:opacity-90">
             Enviar
           </button>
         </div>
         <div class="preset-msg-card">
-          <button type="button" onclick="seleccionarMensajeRapido(1)" class="flex-1 text-left text-xs font-semibold text-zinc-800 pr-1">
+          <button type="button" data-action="select-quick-msg" data-arg="1" class="flex-1 text-left text-xs font-semibold text-zinc-800 pr-1">
             Ya actualicé la aplicación, te amo mucho ❤️
           </button>
-          <button type="button" onclick="enviarMensajeRapido(1)" class="shrink-0 px-3 py-1.5 rounded-full theme-bg-primary text-white text-[11px] font-bold shadow-sm hover:opacity-90">
+          <button type="button" data-action="send-quick-msg" data-arg="1" class="shrink-0 px-3 py-1.5 rounded-full theme-bg-primary text-white text-[11px] font-bold shadow-sm hover:opacity-90">
             Enviar
           </button>
         </div>
-        <button id="btn-send-shopping-wa" type="button" onclick="enviarListaComprasWhatsApp()"
+        <button id="btn-send-shopping-wa" type="button" data-action="send-shopping-whatsapp"
           class="w-full py-2.5 px-3 rounded-2xl border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-zinc-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors">
           🛒 Consultar / enviar lista de compras actual
         </button>
@@ -512,18 +486,18 @@
       <div class="space-y-1.5">
         <p class="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Emojis básicos</p>
         <div class="flex flex-wrap gap-1.5">
-          <button type="button" class="emoji-chip" onclick="insertEmoji('❤️')" aria-label="Corazón">❤️</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('😘')" aria-label="Beso">😘</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('🥰')" aria-label="Enamorado">🥰</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('😍')" aria-label="Ojos de corazón">😍</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('✨')" aria-label="Brillos">✨</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('💸')" aria-label="Dinero">💸</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('🛒')" aria-label="Compras">🛒</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('🍔')" aria-label="Comida">🍔</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('☕')" aria-label="Café">☕</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('🎉')" aria-label="Festejo">🎉</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('🙏')" aria-label="Gracias">🙏</button>
-          <button type="button" class="emoji-chip" onclick="insertEmoji('😂')" aria-label="Risa">😂</button>
+          <button type="button" class="emoji-chip" data-emoji="❤️" aria-label="Corazón">❤️</button>
+          <button type="button" class="emoji-chip" data-emoji="😘" aria-label="Beso">😘</button>
+          <button type="button" class="emoji-chip" data-emoji="🥰" aria-label="Enamorado">🥰</button>
+          <button type="button" class="emoji-chip" data-emoji="😍" aria-label="Ojos de corazón">😍</button>
+          <button type="button" class="emoji-chip" data-emoji="✨" aria-label="Brillos">✨</button>
+          <button type="button" class="emoji-chip" data-emoji="💸" aria-label="Dinero">💸</button>
+          <button type="button" class="emoji-chip" data-emoji="🛒" aria-label="Compras">🛒</button>
+          <button type="button" class="emoji-chip" data-emoji="🍔" aria-label="Comida">🍔</button>
+          <button type="button" class="emoji-chip" data-emoji="☕" aria-label="Café">☕</button>
+          <button type="button" class="emoji-chip" data-emoji="🎉" aria-label="Festejo">🎉</button>
+          <button type="button" class="emoji-chip" data-emoji="🙏" aria-label="Gracias">🙏</button>
+          <button type="button" class="emoji-chip" data-emoji="😂" aria-label="Risa">😂</button>
         </div>
       </div>
 
@@ -532,7 +506,7 @@
         <textarea id="msg-custom-input" rows="2" maxlength="500"
           placeholder="Escribí un mensajito personalizado..."
           class="w-full rounded-2xl border border-zinc-200 px-3.5 py-2.5 text-base text-zinc-800 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-300 resize-none"></textarea>
-        <button id="btn-send-msg" type="button" onclick="enviarMensajePareja()"
+        <button id="btn-send-msg" type="button" data-action="send-custom-msg"
           class="w-full py-3 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90 transition-opacity">
           Enviar a WhatsApp 💌
         </button>
@@ -541,22 +515,22 @@
   </div>
 
   <!-- MODAL: Lista de Compras Compartida -->
-  <div id="shopping-modal" class="modal-overlay" onclick="if (event.target === this) closeShoppingModal()">
+  <div id="shopping-modal" class="modal-overlay" data-backdrop-close="shopping">
     <div id="shopping-modal-card" class="bg-white w-[92%] max-w-sm rounded-3xl p-5 shadow-2xl space-y-3.5 max-h-[88vh] flex flex-col overflow-hidden">
       <div class="flex justify-between items-start gap-2 shrink-0">
         <div>
           <h3 class="font-bold text-base text-zinc-900">🛒 Lista de compras</h3>
           <p class="text-[11px] text-zinc-500 mt-0.5">Compartida · No descuenta del presupuesto</p>
         </div>
-        <button type="button" onclick="closeShoppingModal()" class="text-zinc-400 hover:text-zinc-700 font-bold text-base px-1" aria-label="Cerrar lista de compras">✕</button>
+        <button type="button" data-action="close-shopping-modal" class="text-zinc-400 hover:text-zinc-700 font-bold text-base px-1" aria-label="Cerrar lista de compras">✕</button>
       </div>
 
       <!-- Input para agregar ítem rápido -->
       <div class="flex items-center gap-2 shrink-0">
         <input id="shopping-item-input" type="text" maxlength="120" placeholder="Agregar producto o pendiente..."
-          oninput="capitalizeInput(this)"
+          data-capitalize="true"
           class="flex-1 min-w-0 rounded-2xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 text-base text-zinc-900 placeholder-zinc-400 focus:outline-none focus:bg-white focus:border-zinc-400">
-        <button id="btn-add-shopping-item" type="button" onclick="agregarItemListaCompras()"
+        <button id="btn-add-shopping-item" type="button" data-action="add-shopping-item"
           class="shrink-0 w-11 h-11 rounded-2xl theme-bg-primary text-white font-bold text-xl leading-none flex items-center justify-center shadow-sm hover:opacity-90 active:scale-95 transition-all"
           aria-label="Agregar a la lista">
           +
@@ -569,7 +543,7 @@
       <!-- Pie con resumen y botón Limpiar tachados -->
       <div id="shopping-footer-bar" class="pt-2 border-t border-zinc-100 flex items-center justify-between gap-2 shrink-0">
         <span id="shopping-summary-text" class="text-[11px] font-semibold text-zinc-500">Sin pendientes</span>
-        <button id="btn-clear-shopping-done" type="button" onclick="limpiarCompradosListaCompras()"
+        <button id="btn-clear-shopping-done" type="button" data-action="clear-checked-shopping"
           class="hidden text-xs font-bold text-rose-600 hover:text-rose-700 px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 transition-colors">
           Limpiar tachados
         </button>
@@ -582,23 +556,36 @@
     Presioná dos veces seguidas para salir
   </div>
 
+  <!-- MODAL: Clave de Acceso de Seguridad -->
+  <div id="access-key-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="access-key-title">
+    <div id="access-key-modal-card" class="bg-white w-[92%] max-w-sm rounded-3xl p-6 shadow-2xl space-y-4">
+      <div class="space-y-1">
+        <div class="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-zinc-500">
+          <span>🔒</span>
+          <span>Acceso protegido</span>
+        </div>
+        <h3 id="access-key-title" class="font-bold text-lg text-zinc-900">Ingresá tu clave de acceso</h3>
+        <p class="text-xs text-zinc-500 leading-relaxed">Necesaria una sola vez en este teléfono para habilitar la sincronización segura con la planilla.</p>
+      </div>
+      <form id="access-key-form" class="space-y-3" autocomplete="on">
+        <input type="text" name="username" value="multimillonarios" autocomplete="username" class="hidden" tabindex="-1" aria-hidden="true">
+        <div>
+          <label for="access-key-input" class="sr-only">Clave de acceso</label>
+          <input id="access-key-input" type="password" required autocomplete="current-password"
+            placeholder="Pegá la clave compartida..."
+            class="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-base text-zinc-900 placeholder-zinc-400 focus:outline-none focus:bg-white focus:border-zinc-400">
+        </div>
+        <p id="access-key-error" class="hidden text-xs font-medium text-[#d31818]"></p>
+        <button id="btn-submit-access-key" type="submit"
+          class="w-full py-3 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90 transition-opacity">
+          Desbloquear y sincronizar
+        </button>
+      </form>
+    </div>
+  </div>
+
   <!-- Script de lógica de la aplicación -->
   <script src="app.js"></script>
-
-  <!-- Registro de Service Worker para soporte PWA Offline e Instalable -->
-  <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-          .then(reg => {
-            console.log('Service Worker registrado con éxito con alcance:', reg.scope);
-          })
-          .catch(err => {
-            console.error('Error al registrar Service Worker:', err);
-          });
-      });
-    }
-  </script>
 </body>
 
 </html>

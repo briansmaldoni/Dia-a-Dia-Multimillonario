@@ -549,9 +549,14 @@ html.ptr-blocked body {
 }
 
 #message-modal,
-#shopping-modal {
+#shopping-modal,
+#access-key-modal {
   align-items: center;
   padding: 12px 0;
+}
+
+#access-key-modal {
+  z-index: 600;
 }
 
 .preset-msg-card {
