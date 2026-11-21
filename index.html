@@ -226,7 +226,7 @@
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"></path>
                     </svg>
                   </button>
-                  <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 flex-1 days-carousel"
+                  <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 flex-1 min-w-0 days-carousel"
                     id="tx-days-carousel">
                     <!-- Se llena dinámicamente según días restantes -->
                   </div>
@@ -236,6 +236,7 @@
                     </svg>
                   </button>
                 </div>
+                <p id="tx-divisible-hint" class="hidden text-[11px] theme-text-muted text-center opacity-90"></p>
 
                 <!-- Inputs de compatibilidad nativa ocultos -->
                 <input id="tx-assigned-date" type="hidden">
@@ -341,7 +342,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"></path>
                   </svg>
                 </button>
-                <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 flex-1 days-carousel" id="hb-excluded-days-list">
+                <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1 flex-1 min-w-0 days-carousel" id="hb-excluded-days-list">
                   <!-- Se llena dinámicamente con días desde el 28 hasta antes del cobro -->
                 </div>
                 <button type="button" onclick="event.stopPropagation(); scrollDaysCarousel(1, 'hb-excluded-days-list')" class="nav-arrow-btn nav-arrow-btn-white shrink-0" title="Día siguiente">
@@ -350,13 +351,6 @@
                   </svg>
                 </button>
               </div>
-            </div>
-
-            <!-- Enlace limpiar gastos -->
-            <div class="pt-3 text-center">
-              <button type="button" id="btn-limpiar-gastos" onclick="handleLimpiarPendientes()" class="text-xs font-normal text-white underline hover:opacity-80 transition-colors">
-                Limpiar gastos registrados
-              </button>
             </div>
           </div>
 

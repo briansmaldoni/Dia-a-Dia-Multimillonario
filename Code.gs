@@ -65,7 +65,6 @@ function ejecutarAccion_(accion, payload) {
     case 'guardarMovimiento': return guardarMovimiento_(payload);
     case 'eliminarMovimiento': return eliminarMovimiento_(payload);
     case 'actualizarHB': return actualizarHB_(payload);
-    case 'limpiarMovimientosPendientes': return limpiarMovimientosPendientes_();
     case 'resolverCierreDia': return resolverCierreDia_(payload);
     case 'actualizarConfig': return actualizarConfig_(payload);
     case 'enviarMensaje': return enviarMensaje_(payload);
@@ -750,26 +749,6 @@ function actualizarHB_(payload) {
       bolsaTotal: getConfigNumero_(cfg, 'bolsaTotal', 0),
       diasExcluidos: diasExcluidos
     };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function limpiarMovimientosPendientes_() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    invalidarCacheSheet_('Movimientos');
-    const sheet = getSheet_('Movimientos', true);
-    const lastRow = sheet.getLastRow();
-    const borrados = Math.max(0, lastRow - 1);
-    if (borrados > 0) {
-      const numCols = Math.max(sheet.getLastColumn(), SHEET_SCHEMAS.Movimientos.columns.length);
-      sheet.getRange(2, 1, borrados, numCols).clearContent();
-      SpreadsheetApp.flush();
-      invalidarCacheSheet_('Movimientos');
-    }
-    return { borrados: borrados, candidatos: [] };
   } finally {
     lock.releaseLock();
   }

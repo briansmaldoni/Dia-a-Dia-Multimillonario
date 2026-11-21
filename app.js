@@ -35,9 +35,6 @@ let autoSyncTimer_ = null;
 let wasKeyboardOpen_ = false;
 let hbDraftDiasExcluidos_ = [];
 let hbExcludedDirty_ = false;
-let limpiarConfirmArmado_ = false;
-let limpiarConfirmTimer_ = null;
-let limpiarEnCurso_ = false;
 let isExitingApp_ = false;
 let lastAutoReloadTs_ = 0;
 let isReloadingDiario_ = false;
@@ -1240,7 +1237,6 @@ function cerrarSubvistasTarjetaExcepto_(keepId) {
       hbExcludedDirty_ = false;
       setMoneyValue('hb-update-amount', '');
       setMoneyValue('hb-bolsa-input', '');
-      resetLimpiarConfirm_();
     }
     const el = document.getElementById(id);
     if (el) {
@@ -1268,7 +1264,6 @@ function toggleHbModal(show) {
     hbExcludedDirty_ = false;
     setMoneyValue('hb-update-amount', '');
     setMoneyValue('hb-bolsa-input', '');
-    resetLimpiarConfirm_();
     if (modal) {
       modal.classList.add('hidden');
       modal.classList.remove('flex', 'active');
@@ -1394,7 +1389,6 @@ function refrescarVistaHbModalSiAbierto_() {
 function prepararHbModal_() {
   hbExcludedDirty_ = false;
   hbDraftDiasExcluidos_ = getDiasExcluidosEnPeriodo_().slice();
-  resetLimpiarConfirm_();
   setMoneyValue('hb-update-amount', '');
   setMoneyValue('hb-bolsa-input', '');
   renderHbExcludedDaysSelector_();
@@ -1518,67 +1512,6 @@ function initOutsideCardTapToClose_() {
       if (el && !el.classList.contains('hidden')) sv.close();
     });
   });
-}
-
-// ============================================================
-// "LIMPIAR GASTOS REGISTRADOS"
-// ============================================================
-
-function resetLimpiarConfirm_() {
-  if (limpiarConfirmTimer_) {
-    clearTimeout(limpiarConfirmTimer_);
-    limpiarConfirmTimer_ = null;
-  }
-  limpiarConfirmArmado_ = false;
-  const btn = document.getElementById('btn-limpiar-gastos');
-  if (btn) btn.textContent = 'Limpiar gastos registrados';
-}
-
-async function handleLimpiarPendientes() {
-  if (limpiarEnCurso_) return;
-  const btn = document.getElementById('btn-limpiar-gastos');
-  if (!limpiarConfirmArmado_) {
-    limpiarConfirmArmado_ = true;
-    if (btn) btn.textContent = '¿Borrar TODOS los gastos? No cambia saldo ni ahorros. Tocá de nuevo';
-    if (limpiarConfirmTimer_) clearTimeout(limpiarConfirmTimer_);
-    limpiarConfirmTimer_ = setTimeout(() => resetLimpiarConfirm_(), 4000);
-    return;
-  }
-
-  if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) {
-    showAppToast('Esperá un segundo a que termine de sincronizar', true);
-    resetLimpiarConfirm_();
-    return;
-  }
-
-  resetLimpiarConfirm_();
-  const prevMovs = appState.movimientos.slice();
-  limpiarEnCurso_ = true;
-  if (btn) btn.disabled = true;
-
-  ++diarioLoadToken_;
-  appState.movimientos = [];
-  guardarCacheDiarioLocal_();
-  renderMicroView();
-  refrescarVistaHbModalSiAbierto_();
-
-  mostrarSyncToast_();
-  try {
-    await callBackend('limpiarMovimientosPendientes', {});
-    await recargarEstadoDiario_(false);
-    showAppToast('Gastos limpiados · Presupuesto recalculado');
-  } catch (e) {
-    ++diarioLoadToken_;
-    appState.movimientos = prevMovs;
-    guardarCacheDiarioLocal_();
-    renderMicroView();
-    refrescarVistaHbModalSiAbierto_();
-    showAppToast('Error al limpiar gastos', true);
-  } finally {
-    limpiarEnCurso_ = false;
-    if (btn) btn.disabled = false;
-    ocultarSyncToast_();
-  }
 }
 
 // ============================================================
@@ -1796,6 +1729,35 @@ function setMicroSubView(view, push = true) {
   syncPullToRefreshGuard_();
 }
 
+function parseTxCustomDates_() {
+  const customDaysEl = document.getElementById('tx-custom-days');
+  const raw = (customDaysEl && customDaysEl.value) ? customDaysEl.value.trim() : '';
+  if (!raw) return [];
+
+  const fechas = [];
+  const seen = new Set();
+  const diasPeriodo = appState.diasRestantes || [];
+
+  raw.split(',').map(s => s.trim()).filter(Boolean).forEach(token => {
+    let iso = '';
+    if (esFechaCalendarioValidaLocal_(token)) {
+      iso = token;
+    } else {
+      const num = parseInt(token, 10);
+      if (!isNaN(num)) {
+        const match = diasPeriodo.find(f => Number(f.split('-')[2]) === num);
+        if (match) iso = match;
+      }
+    }
+    if (iso && !seen.has(iso)) {
+      seen.add(iso);
+      fechas.push(iso);
+    }
+  });
+
+  return fechas.sort();
+}
+
 function renderTxDaysCarousel_() {
   const cont = document.getElementById('tx-days-carousel');
   if (!cont) return;
@@ -1804,26 +1766,19 @@ function renderTxDaysCarousel_() {
 
   const hoy = hoyISO_();
   const dias = (appState.diasRestantes && appState.diasRestantes.length)
-    ? appState.diasRestantes.slice(0, 15)
+    ? appState.diasRestantes.slice()
     : [hoy];
   if (!dias.includes(hoy)) dias.unshift(hoy);
 
   const assignedInput = document.getElementById('tx-assigned-date');
-  const customDaysInput = document.getElementById('tx-custom-days');
   const currentAssigned = (assignedInput && assignedInput.value) || hoy;
-  const customDaysStr = (customDaysInput && customDaysInput.value) ? customDaysInput.value : '';
-  const customDayNums = customDaysStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+  const selectedDates = parseTxCustomDates_();
 
+  const prevScroll = cont.scrollLeft || 0;
   cont.innerHTML = dias.map(f => {
-    const partes = f.split('-').map(Number);
-    const numDia = partes[2];
-
-    let isSelected = false;
-    if (txModalSubtype === 'single') {
-      isSelected = (f === currentAssigned);
-    } else {
-      isSelected = customDayNums.includes(numDia) || (customDayNums.length === 0 && f === currentAssigned);
-    }
+    const isSelected = (txModalSubtype === 'single')
+      ? (f === currentAssigned)
+      : selectedDates.includes(f);
 
     const isExcl = esDiaExcluido_(f);
     return renderDayPillHtml_(
@@ -1834,35 +1789,47 @@ function renderTxDaysCarousel_() {
       isExcl
     );
   }).join('');
+  cont.scrollLeft = prevScroll;
+
+  const divHint = document.getElementById('tx-divisible-hint');
+  if (divHint) {
+    if (txModalSubtype !== 'divisible') {
+      divHint.classList.add('hidden');
+    } else {
+      const totalActivos = getDiasActivos_().length || (appState.diasRestantes ? appState.diasRestantes.length : 1);
+      divHint.textContent = selectedDates.length === 0
+        ? ('Sin elegir días: se divide en todos los días activos (' + totalActivos + (totalActivos === 1 ? ' día)' : ' días)'))
+        : ('Dividido en ' + selectedDates.length + (selectedDates.length === 1 ? ' día seleccionado' : ' días seleccionados'));
+      divHint.classList.remove('hidden');
+    }
+  }
 }
 
 function selectTxDay_(fechaISO) {
   const assignedInput = document.getElementById('tx-assigned-date');
   const customDaysInput = document.getElementById('tx-custom-days');
-  const partes = fechaISO.split('-').map(Number);
-  const numDia = partes[2];
 
   if (txModalSubtype === 'single') {
     if (assignedInput) assignedInput.value = fechaISO;
   } else {
-    let currentNums = (customDaysInput && customDaysInput.value)
-      ? customDaysInput.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
-      : [];
-    if (currentNums.includes(numDia)) {
-      currentNums = currentNums.filter(n => n !== numDia);
+    let selected = parseTxCustomDates_();
+    if (selected.includes(fechaISO)) {
+      selected = selected.filter(f => f !== fechaISO);
     } else {
-      currentNums.push(numDia);
+      selected.push(fechaISO);
+      selected.sort();
     }
-    currentNums.sort((a, b) => a - b);
-    if (customDaysInput) customDaysInput.value = currentNums.join(', ');
-    if (assignedInput && currentNums.length) {
-      assignedInput.value = fechaISO;
-    }
+    if (customDaysInput) customDaysInput.value = selected.join(',');
+    const daysCountEl = document.getElementById('tx-days-count');
+    if (daysCountEl) daysCountEl.value = '';
+    const divStartEl = document.getElementById('tx-divisible-start-date');
+    if (divStartEl) divStartEl.value = '';
   }
   renderTxDaysCarousel_();
 }
 
 function setTxSubtype(tipo) {
+  const prevSubtype = txModalSubtype;
   txModalSubtype = tipo;
 
   const tabSingle = document.getElementById('tab-single');
@@ -1881,11 +1848,21 @@ function setTxSubtype(tipo) {
   if (assignCont) assignCont.classList.toggle('hidden', tipo === 'divisible');
   const divOpts = document.getElementById('divisible-options');
   if (divOpts) divOpts.classList.toggle('hidden', tipo !== 'divisible');
+
+  const customDaysEl = document.getElementById('tx-custom-days');
+  if (customDaysEl) customDaysEl.value = '';
+  const daysCountEl = document.getElementById('tx-days-count');
+  if (daysCountEl) daysCountEl.value = '';
+  const divStartEl = document.getElementById('tx-divisible-start-date');
+  if (divStartEl) divStartEl.value = '';
+
+  const fechaEl = document.getElementById('tx-assigned-date');
   if (tipo === 'divisible') {
     const chkBag = document.getElementById('chk-from-bag');
     if (chkBag) chkBag.checked = false;
-    const fechaEl = document.getElementById('tx-assigned-date');
     if (fechaEl) fechaEl.removeAttribute('disabled');
+  } else if (prevSubtype === 'divisible' && fechaEl) {
+    fechaEl.value = hoyISO_();
   }
   renderTxDaysCarousel_();
 }
@@ -1970,19 +1947,17 @@ function prepararTxModalEdicion_(movimientoId) {
 
   const fechas = normalizarFechas_(m.fechasAfectadas);
   const assignEl = document.getElementById('tx-assigned-date');
-  if (assignEl) assignEl.value = fechas[0] || hoyISO_();
+  if (assignEl) {
+    assignEl.value = (m.tipo === 'single') ? (fechas[0] || hoyISO_()) : hoyISO_();
+  }
 
   if (m.tipo === 'divisible') {
     const daysCountEl = document.getElementById('tx-days-count');
-    if (daysCountEl) daysCountEl.value = fechas.length || '';
+    if (daysCountEl) daysCountEl.value = '';
     const divStartEl = document.getElementById('tx-divisible-start-date');
-    if (divStartEl) divStartEl.value = fechas[0] || hoyISO_();
-    const customDaysStr = fechas.map(f => {
-      const p = f.split('-').map(Number);
-      return p[2];
-    }).join(', ');
+    if (divStartEl) divStartEl.value = '';
     const customDaysEl = document.getElementById('tx-custom-days');
-    if (customDaysEl) customDaysEl.value = customDaysStr;
+    if (customDaysEl) customDaysEl.value = fechas.join(',');
   }
 
   const chkBag = document.getElementById('chk-from-bag');
@@ -2020,40 +1995,12 @@ async function handleFormSubmit() {
     const fecha = document.getElementById('tx-assigned-date').value || hoyISO_();
     fechasAfectadas = [fecha];
   } else {
+    const selectedDates = parseTxCustomDates_();
     const diasCount = parseInt(document.getElementById('tx-days-count').value, 10);
     const fechaInicio = document.getElementById('tx-divisible-start-date').value;
-    const customDaysRaw = document.getElementById('tx-custom-days').value.trim();
 
-    if (customDaysRaw) {
-      const base = fechaInicio ? new Date(fechaInicio + 'T00:00:00') : new Date();
-      let currentMonth = base.getMonth();
-      let currentYear = base.getFullYear();
-      let lastDay = 0;
-
-      fechasAfectadas = customDaysRaw.split(',')
-        .map(s => parseInt(s.trim(), 10))
-        .filter(dia => !isNaN(dia))
-        .map(dia => {
-          const enDiasRestantes = (appState.diasRestantes || []).find(fStr => {
-            const p = fStr.split('-').map(Number);
-            return p[2] === dia;
-          });
-          if (enDiasRestantes) {
-            const p = enDiasRestantes.split('-').map(Number);
-            lastDay = p[2];
-            return enDiasRestantes;
-          }
-
-          if (dia < lastDay || (lastDay === 0 && dia < base.getDate())) {
-            currentMonth++;
-            if (currentMonth > 11) {
-              currentMonth = 0;
-              currentYear++;
-            }
-          }
-          lastDay = dia;
-          return formatearFechaISOLocal_(new Date(currentYear, currentMonth, dia));
-        });
+    if (selectedDates.length) {
+      fechasAfectadas = selectedDates;
     } else if (diasCount && fechaInicio) {
       const base = new Date(fechaInicio + 'T00:00:00');
       for (let i = 0; i < diasCount; i++) {
