@@ -293,7 +293,11 @@ function borrarFilaPorId_(sheetName, id) {
   for (let i = 1; i < values.length; i++) {
     const cellId = String(values[i][idColIdx] || '').trim();
     if (cellId === String(id).trim()) {
-      sheet.deleteRow(i + 1);
+      if (sheet.getMaxRows() <= 2) {
+        sheet.getRange(i + 1, 1, 1, Math.max(sheet.getLastColumn(), headers.length)).clearContent();
+      } else {
+        sheet.deleteRow(i + 1);
+      }
       invalidarCacheSheet_(sheetName);
       return true;
     }
@@ -516,8 +520,11 @@ function getEstadoDiario_() {
   const movimientos = leerFilas_('Movimientos').map(limpiarFilaParaCliente_);
 
   const ayerStr = formatearFechaISO_(sumarDias_(hoy, -1));
+  const lastProcessedNorm = String(cfg.lastProcessedDate || '').trim();
   const rawExcluidos = normalizarDiasExcluidos_(parseJsonConfig_(cfg.diasExcluidos));
-  const diasExcluidos = rawExcluidos.filter(f => diasInfo.fechas.indexOf(f) !== -1 || f === ayerStr);
+  const diasExcluidos = rawExcluidos.filter(f =>
+    diasInfo.fechas.indexOf(f) !== -1 || f === ayerStr || (lastProcessedNorm && f === lastProcessedNorm)
+  );
 
   const listaRaw = parseJsonConfig_(cfg.listaCompras);
   const hasBrianWa = !!(String(cfg.greenApiId_Brian || '').trim() && String(cfg.greenApiToken_Brian || '').trim());
@@ -552,73 +559,89 @@ function guardarMovimiento_(data) {
 
   if (data.tipo !== 'single' && data.tipo !== 'divisible') throw new Error('Tipo inválido: ' + data.tipo);
 
-  const cfg = leerConfig_();
-  let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-  let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+  let obj = null;
+  let waInfo = null;
 
-  const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
-  const actorUsuario = (data.actorUsuario && String(data.actorUsuario).trim()) ? String(data.actorUsuario).trim() : usuario;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    invalidarCacheSheet_('Movimientos');
 
-  const id = data.id || Utilities.getUuid();
-  const filasMov = leerFilas_('Movimientos');
-  const movExistente = data.id ? filasMov.find(m => String(m.id).trim() === String(data.id).trim()) : null;
+    const cfg = leerConfig_(true);
+    let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
+    let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
 
-  if (movExistente) {
-    hbTotal += (movExistente.monto || 0);
-    if (movExistente.fromBag) {
-      bolsaTotal += (movExistente.monto || 0);
+    const usuario = (data.usuario && String(data.usuario).trim()) ? String(data.usuario).trim() : (cfg.usuarioDefault || 'Brian');
+    const actorUsuario = (data.actorUsuario && String(data.actorUsuario).trim()) ? String(data.actorUsuario).trim() : usuario;
+
+    const id = data.id || Utilities.getUuid();
+    const filasMov = leerFilas_('Movimientos', true);
+    const movExistente = data.id ? filasMov.find(m => String(m.id).trim() === String(data.id).trim()) : null;
+
+    if (movExistente) {
+      hbTotal += (movExistente.monto || 0);
+      if (movExistente.fromBag) {
+        bolsaTotal += (movExistente.monto || 0);
+      }
     }
-  }
 
-  const nuevoMonto = monto;
-  const nuevoFromBag = !!data.fromBag;
+    const nuevoMonto = monto;
+    const nuevoFromBag = !!data.fromBag;
 
-  hbTotal -= nuevoMonto;
-  if (nuevoFromBag) {
-    bolsaTotal -= nuevoMonto;
-  }
-
-  setConfigValores_({
-    homeBankingTotal: hbTotal,
-    bolsaTotal: bolsaTotal
-  });
-
-  const obj = {
-    id: id,
-    tipo: data.tipo,
-    fechasAfectadas: fechas,
-    monto: nuevoMonto,
-    montoPorFecha: nuevoMonto / fechas.length,
-    descripcion: (data.descripcion || '').trim(),
-    usuario: usuario,
-    fromBag: nuevoFromBag,
-    creadoEn: data.creadoEn || (movExistente ? movExistente.creadoEn : new Date().toISOString())
-  };
-
-  const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
-  if (!actualizado) agregarFila_('Movimientos', obj);
-
-  if (!data.silencioso) {
-    const esEdicion = !!(movExistente || actualizado);
-    const descLimpia = obj.descripcion || (obj.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
-    const montoTxt = formatearMonedaGS_(nuevoMonto);
-    const extras = [];
-    if (obj.tipo === 'divisible' && fechas.length > 1) {
-      extras.push('en ' + fechas.length + ' días · ' + formatearMonedaGS_(obj.montoPorFecha) + '/día');
-    }
+    hbTotal -= nuevoMonto;
     if (nuevoFromBag) {
-      extras.push('desde ahorros');
+      bolsaTotal -= nuevoMonto;
     }
-    const extraTxt = extras.length ? (' (' + extras.join(', ') + ')') : '';
-    const antesTxt = (esEdicion && movExistente && Number(movExistente.monto) !== nuevoMonto)
-      ? (' (antes ' + formatearMonedaGS_(movExistente.monto) + ')')
-      : '';
-    const dispTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
-      ? ('\n💰 Disponible para hoy: *' + String(data.disponibleHoyTexto).trim() + '*')
-      : '';
-    const encabezado = esEdicion ? '✏️ Amorcito, edité este gasto:' : '💸 Amorcito, registré este gasto:';
-    const mensajeWa = encabezado + '\n• *' + descLimpia + ':* ' + montoTxt + antesTxt + extraTxt + dispTxt;
-    enviarWhatsAppGreenApi_(cfg, actorUsuario, mensajeWa);
+
+    escribirConfigSinLock_({
+      homeBankingTotal: hbTotal,
+      bolsaTotal: bolsaTotal
+    });
+
+    obj = {
+      id: id,
+      tipo: data.tipo,
+      fechasAfectadas: fechas,
+      monto: nuevoMonto,
+      montoPorFecha: nuevoMonto / fechas.length,
+      descripcion: (data.descripcion || '').trim(),
+      usuario: usuario,
+      fromBag: nuevoFromBag,
+      creadoEn: data.creadoEn || (movExistente ? movExistente.creadoEn : new Date().toISOString())
+    };
+
+    const actualizado = data.id ? actualizarFilaPorId_('Movimientos', id, obj) : false;
+    if (!actualizado) agregarFila_('Movimientos', obj);
+
+    if (!data.silencioso) {
+      const esEdicion = !!(movExistente || actualizado);
+      const descLimpia = obj.descripcion || (obj.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
+      const montoTxt = formatearMonedaGS_(nuevoMonto);
+      const extras = [];
+      if (obj.tipo === 'divisible' && fechas.length > 1) {
+        extras.push('en ' + fechas.length + ' días · ' + formatearMonedaGS_(obj.montoPorFecha) + '/día');
+      }
+      if (nuevoFromBag) {
+        extras.push('desde ahorros');
+      }
+      const extraTxt = extras.length ? (' (' + extras.join(', ') + ')') : '';
+      const antesTxt = (esEdicion && movExistente && Number(movExistente.monto) !== nuevoMonto)
+        ? (' (antes ' + formatearMonedaGS_(movExistente.monto) + ')')
+        : '';
+      const dispTxt = (data.disponibleHoyTexto && String(data.disponibleHoyTexto).trim())
+        ? ('\n💰 Disponible para hoy: *' + String(data.disponibleHoyTexto).trim() + '*')
+        : '';
+      const encabezado = esEdicion ? '✏️ Amorcito, edité este gasto:' : '💸 Amorcito, registré este gasto:';
+      const mensajeWa = encabezado + '\n• *' + descLimpia + ':* ' + montoTxt + antesTxt + extraTxt + dispTxt;
+      waInfo = { cfg: cfg, actorUsuario: actorUsuario, mensajeWa: mensajeWa };
+    }
+  } finally {
+    lock.releaseLock();
+  }
+
+  if (waInfo) {
+    enviarWhatsAppGreenApi_(waInfo.cfg, waInfo.actorUsuario, waInfo.mensajeWa);
   }
 
   return obj;
@@ -631,94 +654,155 @@ function eliminarMovimiento_(payload) {
   const disponibleHoyTexto = (payload && typeof payload === 'object' && payload.disponibleHoyTexto) ? String(payload.disponibleHoyTexto).trim() : '';
   const silencioso = !!(payload && typeof payload === 'object' && payload.silencioso);
 
-  const filasMov = leerFilas_('Movimientos');
-  const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
+  let borrado = false;
+  let waInfo = null;
 
-  if (movExistente) {
-    const cfg = leerConfig_();
-    let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-    let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    invalidarCacheSheet_('Movimientos');
 
-    hbTotal += (movExistente.monto || 0);
-    if (movExistente.fromBag) {
-      bolsaTotal += (movExistente.monto || 0);
+    const filasMov = leerFilas_('Movimientos', true);
+    const movExistente = filasMov.find(m => String(m.id).trim() === String(id).trim());
+
+    if (movExistente) {
+      const cfg = leerConfig_(true);
+      let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
+      let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
+
+      hbTotal += (movExistente.monto || 0);
+      if (movExistente.fromBag) {
+        bolsaTotal += (movExistente.monto || 0);
+      }
+
+      escribirConfigSinLock_({
+        homeBankingTotal: hbTotal,
+        bolsaTotal: bolsaTotal
+      });
+
+      borrado = borrarFilaPorId_('Movimientos', id);
+      if (borrado && !silencioso) {
+        const actorUsuario = usuarioPayload || movExistente.usuario || cfg.usuarioDefault || 'Brian';
+        const descLimpia = movExistente.descripcion || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
+        const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
+        const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
+        const dispTxt = disponibleHoyTexto ? ('\n💰 Disponible para hoy: *' + disponibleHoyTexto + '*') : '';
+        const mensajeWa = '🗑️ Amorcito, eliminé este gasto:\n• *' + descLimpia + ':* ' + montoTxt + bolsaTxt + dispTxt;
+        waInfo = { cfg: cfg, actorUsuario: actorUsuario, mensajeWa: mensajeWa };
+      }
     }
-
-    setConfigValores_({
-      homeBankingTotal: hbTotal,
-      bolsaTotal: bolsaTotal
-    });
-
-    const borrado = borrarFilaPorId_('Movimientos', id);
-    if (borrado && !silencioso) {
-      const actorUsuario = usuarioPayload || movExistente.usuario || cfg.usuarioDefault || 'Brian';
-      const descLimpia = movExistente.descripcion || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
-      const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
-      const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
-      const dispTxt = disponibleHoyTexto ? ('\n💰 Disponible para hoy: *' + disponibleHoyTexto + '*') : '';
-      const mensajeWa = '🗑️ Amorcito, eliminé este gasto:\n• *' + descLimpia + ':* ' + montoTxt + bolsaTxt + dispTxt;
-      enviarWhatsAppGreenApi_(cfg, actorUsuario, mensajeWa);
-    }
-    return borrado;
+  } finally {
+    lock.releaseLock();
   }
-  return false;
+
+  if (waInfo) {
+    enviarWhatsAppGreenApi_(waInfo.cfg, waInfo.actorUsuario, waInfo.mensajeWa);
+  }
+  return borrado;
 }
 
 function actualizarHB_(payload) {
-  const cambios = {};
-  if (payload.homeBankingTotal !== undefined && payload.homeBankingTotal !== null && payload.homeBankingTotal !== '') {
-    const hb = Number(payload.homeBankingTotal);
-    if (isNaN(hb)) throw new Error('homeBankingTotal inválido');
-    cambios.homeBankingTotal = hb;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfgActual = leerConfig_(true);
+    const feriadosExtra = leerFilas_('Feriados', true);
+    const hoy = new Date();
+    const diasInfo = calcularDiasRestantes_(hoy, feriadosExtra);
+    const ayerStr = formatearFechaISO_(sumarDias_(hoy, -1));
+    const lastProcessedNorm = String(cfgActual.lastProcessedDate || '').trim();
+
+    const cambios = {};
+    if (payload && payload.homeBankingTotal !== undefined && payload.homeBankingTotal !== null && payload.homeBankingTotal !== '') {
+      const hb = Number(payload.homeBankingTotal);
+      if (isNaN(hb)) throw new Error('homeBankingTotal inválido');
+      cambios.homeBankingTotal = hb;
+    }
+    if (payload && payload.bolsaTotal !== undefined && payload.bolsaTotal !== null && payload.bolsaTotal !== '') {
+      const bolsa = Number(payload.bolsaTotal);
+      if (isNaN(bolsa) || bolsa < 0) throw new Error('bolsaTotal inválido');
+      cambios.bolsaTotal = bolsa;
+    }
+    if (payload && Array.isArray(payload.diasExcluidos)) {
+      const excluidosSolicitados = normalizarDiasExcluidos_(payload.diasExcluidos)
+        .filter(f => diasInfo.fechas.indexOf(f) !== -1);
+      if (diasInfo.fechas.length > 0 && excluidosSolicitados.length >= diasInfo.fechas.length) {
+        throw new Error('Debe quedar al menos 1 día activo');
+      }
+      const previos = normalizarDiasExcluidos_(parseJsonConfig_(cfgActual.diasExcluidos));
+      const historicosPreservados = previos.filter(f =>
+        diasInfo.fechas.indexOf(f) === -1 && (f === ayerStr || (lastProcessedNorm && f === lastProcessedNorm))
+      );
+      cambios.diasExcluidos = JSON.stringify(normalizarDiasExcluidos_(excluidosSolicitados.concat(historicosPreservados)));
+    }
+    if (Object.keys(cambios).length > 0) {
+      escribirConfigSinLock_(cambios);
+    }
+    const cfg = leerConfig_(true);
+    const rawExcluidos = normalizarDiasExcluidos_(parseJsonConfig_(cfg.diasExcluidos));
+    const diasExcluidos = rawExcluidos.filter(f =>
+      diasInfo.fechas.indexOf(f) !== -1 || f === ayerStr || (lastProcessedNorm && f === lastProcessedNorm)
+    );
+    return {
+      homeBankingTotal: getConfigNumero_(cfg, 'homeBankingTotal', 0),
+      bolsaTotal: getConfigNumero_(cfg, 'bolsaTotal', 0),
+      diasExcluidos: diasExcluidos
+    };
+  } finally {
+    lock.releaseLock();
   }
-  if (payload.bolsaTotal !== undefined && payload.bolsaTotal !== null && payload.bolsaTotal !== '') {
-    const bolsa = Number(payload.bolsaTotal);
-    if (isNaN(bolsa) || bolsa < 0) throw new Error('bolsaTotal inválido');
-    cambios.bolsaTotal = bolsa;
-  }
-  if (payload && Array.isArray(payload.diasExcluidos)) {
-    const excluidosLimpios = normalizarDiasExcluidos_(payload.diasExcluidos);
-    cambios.diasExcluidos = JSON.stringify(excluidosLimpios);
-  }
-  if (Object.keys(cambios).length > 0) {
-    setConfigValores_(cambios);
-  }
-  const cfg = leerConfig_();
-  return {
-    homeBankingTotal: getConfigNumero_(cfg, 'homeBankingTotal', 0),
-    bolsaTotal: getConfigNumero_(cfg, 'bolsaTotal', 0),
-    diasExcluidos: normalizarDiasExcluidos_(parseJsonConfig_(cfg.diasExcluidos))
-  };
 }
 
 function limpiarMovimientosPendientes_() {
-  const sheet = getSheet_('Movimientos', true);
-  const lastRow = sheet.getLastRow();
-  const borrados = Math.max(0, lastRow - 1);
-  if (borrados > 0) {
-    sheet.deleteRows(2, borrados);
-    SpreadsheetApp.flush();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
     invalidarCacheSheet_('Movimientos');
+    const sheet = getSheet_('Movimientos', true);
+    const lastRow = sheet.getLastRow();
+    const borrados = Math.max(0, lastRow - 1);
+    if (borrados > 0) {
+      const numCols = Math.max(sheet.getLastColumn(), SHEET_SCHEMAS.Movimientos.columns.length);
+      sheet.getRange(2, 1, borrados, numCols).clearContent();
+      SpreadsheetApp.flush();
+      invalidarCacheSheet_('Movimientos');
+    }
+    return { borrados: borrados, candidatos: [] };
+  } finally {
+    lock.releaseLock();
   }
-  return { borrados: borrados, candidatos: [] };
 }
 
 function resolverCierreDia_(payload) {
-  const cfg = leerConfig_();
-  let bolsaActual = getConfigNumero_(cfg, 'bolsaTotal', 0);
-
-  if (payload.decision === 'bolsa') {
-    if (payload.tipo === 'sobrante') {
-      bolsaActual += payload.monto;
-    } else {
-      bolsaActual = Math.max(bolsaActual - payload.monto, 0);
-    }
-    setConfigValores_({ bolsaTotal: bolsaActual });
-  }
-
   const hoyStr = formatearFechaISO_(new Date());
-  setConfigValores_({ lastProcessedDate: hoyStr });
-  return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    invalidarCacheSheet_('Config');
+    const cfg = leerConfig_(true);
+    let bolsaActual = getConfigNumero_(cfg, 'bolsaTotal', 0);
+    if (String(cfg.lastProcessedDate || '').trim() === hoyStr) {
+      return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr };
+    }
+
+    const cambios = { lastProcessedDate: hoyStr };
+    if (payload && payload.decision === 'bolsa') {
+      const monto = Math.max(0, Number(payload.monto) || 0);
+      if (payload.tipo === 'sobrante') {
+        bolsaActual += monto;
+      } else {
+        bolsaActual = Math.max(bolsaActual - monto, 0);
+      }
+      cambios.bolsaTotal = bolsaActual;
+    }
+
+    escribirConfigSinLock_(cambios);
+    return { bolsaTotal: bolsaActual, lastProcessedDate: hoyStr };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function actualizarConfig_(cambios) {
@@ -736,6 +820,16 @@ function parseJsonConfig_(rawVal) {
   }
 }
 
+function esFechaCalendarioValida_(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '').trim());
+  if (!m) return false;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(y, mo - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === (mo - 1) && dt.getDate() === d;
+}
+
 function normalizarDiasExcluidos_(raw) {
   let lista = raw;
   if (typeof lista === 'string') {
@@ -745,7 +839,7 @@ function normalizarDiasExcluidos_(raw) {
   const seen = {};
   return lista
     .map(f => String(f || '').trim())
-    .filter(f => /^\d{4}-\d{2}-\d{2}$/.test(f))
+    .filter(esFechaCalendarioValida_)
     .filter(f => {
       if (seen[f]) return false;
       seen[f] = true;

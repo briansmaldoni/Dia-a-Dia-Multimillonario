@@ -1,29 +1,27 @@
-const CACHE_NAME = 'multimillonarios-cache-v47';
+const CACHE_NAME = 'multimillonarios-cache-v48';
 
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE_NAME).then(c => c.addAll([
-      './',
-      './index.html',
-      './app.js',
-      './styles.css',
-      './manifest.json',
-      './icon-192.png',
-      './icon-512.png'
-    ]))
+    caches.open(CACHE_NAME)
+      .then(c => c.addAll([
+        './',
+        './index.html',
+        './app.js',
+        './styles.css',
+        './manifest.json',
+        './icon-192.png',
+        './icon-512.png'
+      ]))
+      .then(() => self.skipWaiting())
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys => {
-      return Promise.all(
-        keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
-      );
-    })
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', e => {
@@ -41,6 +39,11 @@ self.addEventListener('fetch', e => {
         }
         return res;
       })
-      .catch(() => caches.match(e.request))
+      .catch(() => {
+        if (e.request.mode === 'navigate') {
+          return caches.match(e.request).then(r => r || caches.match('./index.html'));
+        }
+        return caches.match(e.request);
+      })
   );
 });
