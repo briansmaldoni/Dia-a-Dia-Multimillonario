@@ -19,6 +19,7 @@ const appState = {
   bolsaTotal: 0,
   diaCobro: null,
   diasRestantes: [],
+  diasExcluidos: [],
   movimientos: [],
   listaCompras: [],
   lastProcessedDate: null,
@@ -32,11 +33,13 @@ const PRESET_COUPLE_MESSAGES = [
 
 let autoSyncTimer_ = null;
 let wasKeyboardOpen_ = false;
+let hbDraftDiasExcluidos_ = [];
+let limpiarConfirmArmado_ = false;
+let limpiarConfirmTimer_ = null;
 
 let txModalSubtype = 'single';
 let editingMovimientoId = null;
 let cierreDiaPendiente = null;
-let limpiarColaCandidatos = [];
 
 let pendingSyncCount = 0;
 
@@ -997,12 +1000,59 @@ function setActiveUser(user) {
 // VISTA MICRO (MOTOR DIARIO)
 // ============================================================
 
-function calcularComposicion_(hbOverride, bolsaOverride) {
-  const dias = appState.diasRestantes;
+function normalizarDiasExcluidosLocal_(raw) {
+  let lista = raw;
+  if (typeof lista === 'string') {
+    try { lista = JSON.parse(lista); } catch (e) { lista = []; }
+  }
+  if (!Array.isArray(lista)) return [];
+  const seen = new Set();
+  return lista
+    .map(f => String(f || '').trim())
+    .filter(f => /^\d{4}-\d{2}-\d{2}$/.test(f))
+    .filter(f => {
+      if (seen.has(f)) return false;
+      seen.add(f);
+      return true;
+    })
+    .sort();
+}
+
+function getDiasElegiblesExclusion_() {
+  const dias = appState.diasRestantes || [];
+  if (!dias.length) return [];
+  const cobroYM = appState.diaCobro ? String(appState.diaCobro).slice(0, 7) : '';
+  return dias.filter(f => {
+    const dayNum = Number(String(f).slice(8, 10));
+    const ym = String(f).slice(0, 7);
+    return dayNum >= 28 || (cobroYM && ym === cobroYM);
+  });
+}
+
+function getDiasExcluidosEnPeriodo_(excluidosOverride) {
+  const diasSet = new Set(appState.diasRestantes || []);
+  const fuente = excluidosOverride !== undefined ? excluidosOverride : appState.diasExcluidos;
+  return normalizarDiasExcluidosLocal_(fuente).filter(f => diasSet.has(f));
+}
+
+function getDiasActivos_(excluidosOverride) {
+  const exclSet = new Set(getDiasExcluidosEnPeriodo_(excluidosOverride));
+  return (appState.diasRestantes || []).filter(f => !exclSet.has(f));
+}
+
+function esDiaExcluido_(fechaISO, excluidosOverride) {
+  const fuente = excluidosOverride !== undefined ? excluidosOverride : appState.diasExcluidos;
+  return normalizarDiasExcluidosLocal_(fuente).includes(fechaISO);
+}
+
+function calcularComposicion_(hbOverride, bolsaOverride, excluidosOverride) {
+  const dias = getDiasActivos_(excluidosOverride);
   const hbVal = hbOverride !== undefined ? hbOverride : appState.homeBankingTotal;
   const bolsaVal = bolsaOverride !== undefined ? bolsaOverride : appState.bolsaTotal;
   const liquidHB = hbVal - bolsaVal;
   const gastosPorFecha = {};
+  const gastosTodosPorFecha = {};
+  (appState.diasRestantes || []).forEach(f => { gastosTodosPorFecha[f] = 0; });
   dias.forEach(f => { gastosPorFecha[f] = 0; });
 
   let gastosEnPeriodo = 0;
@@ -1010,6 +1060,9 @@ function calcularComposicion_(hbOverride, bolsaOverride) {
     if (m.fromBag) return;
     const fechas = normalizarFechas_(m.fechasAfectadas);
     fechas.forEach(f => {
+      if (Object.prototype.hasOwnProperty.call(gastosTodosPorFecha, f)) {
+        gastosTodosPorFecha[f] += m.montoPorFecha;
+      }
       if (Object.prototype.hasOwnProperty.call(gastosPorFecha, f)) {
         gastosPorFecha[f] += m.montoPorFecha;
         gastosEnPeriodo += m.montoPorFecha;
@@ -1018,10 +1071,11 @@ function calcularComposicion_(hbOverride, bolsaOverride) {
   });
 
   const objetivoBase = dias.length > 0 ? (liquidHB + gastosEnPeriodo) / dias.length : 0;
-  return { objetivoBase: objetivoBase, gastosPorFecha: gastosPorFecha };
+  return { objetivoBase: objetivoBase, gastosPorFecha: gastosPorFecha, gastosTodosPorFecha: gastosTodosPorFecha };
 }
 
 function presupuestoParaFecha_(fechaISO) {
+  if (esDiaExcluido_(fechaISO)) return 0;
   const comp = calcularComposicion_();
   return comp.objetivoBase - (comp.gastosPorFecha[fechaISO] || 0);
 }
@@ -1044,8 +1098,16 @@ function renderMicroView() {
   if (hoyEl) hoyEl.textContent = formatearMoneda_(presupuestoHoy);
   if (mananaEl) mananaEl.textContent = formatearMoneda_(presupuestoManana);
   if (diasLabel) {
-    diasLabel.textContent = 'Quedan ' + appState.diasRestantes.length +
-      ' días (cobrás el ' + formatearFechaLegible_(appState.diaCobro) + ')';
+    const diasActivos = getDiasActivos_();
+    const excluidosPeriodo = getDiasExcluidosEnPeriodo_();
+    if (excluidosPeriodo.length > 0) {
+      diasLabel.textContent = 'Quedan ' + diasActivos.length + (diasActivos.length === 1 ? ' día activo' : ' días activos') +
+        ' (' + excluidosPeriodo.length + (excluidosPeriodo.length === 1 ? ' exceptuado' : ' exceptuados') +
+        ' · cobrás el ' + formatearFechaLegible_(appState.diaCobro) + ')';
+    } else {
+      diasLabel.textContent = 'Quedan ' + appState.diasRestantes.length +
+        ' días (cobrás el ' + formatearFechaLegible_(appState.diaCobro) + ')';
+    }
   }
 
   renderTransactionList_();
@@ -1108,6 +1170,7 @@ function guardarCacheDiarioLocal_() {
       bolsaTotal: appState.bolsaTotal,
       diaCobro: appState.diaCobro,
       diasRestantes: appState.diasRestantes,
+      diasExcluidos: appState.diasExcluidos,
       movimientos: appState.movimientos,
       listaCompras: appState.listaCompras,
       lastProcessedDate: appState.lastProcessedDate,
@@ -1122,6 +1185,7 @@ function cerrarSubvistasTarjetaExcepto_(keepId) {
     if (id === 'hb-modal') {
       setMoneyValue('hb-update-amount', '');
       setMoneyValue('hb-bolsa-input', '');
+      resetLimpiarConfirm_();
     }
     const el = document.getElementById(id);
     if (el) {
@@ -1148,6 +1212,7 @@ function toggleHbModal(show) {
   } else {
     setMoneyValue('hb-update-amount', '');
     setMoneyValue('hb-bolsa-input', '');
+    resetLimpiarConfirm_();
     if (modal) {
       modal.classList.add('hidden');
       modal.classList.remove('flex', 'active');
@@ -1157,11 +1222,69 @@ function toggleHbModal(show) {
   }
 }
 
+function renderHbExcludedDaysSelector_() {
+  const section = document.getElementById('hb-excluded-days-section');
+  const listEl = document.getElementById('hb-excluded-days-list');
+  const countEl = document.getElementById('hb-excluded-count-label');
+  if (!section || !listEl) return;
+
+  const elegibles = getDiasElegiblesExclusion_();
+  if (!elegibles.length) {
+    section.classList.add('hidden');
+    listEl.innerHTML = '';
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+
+  section.classList.remove('hidden');
+  const exclSet = new Set(getDiasExcluidosEnPeriodo_(hbDraftDiasExcluidos_));
+  const exclCount = exclSet.size;
+  if (countEl) {
+    countEl.textContent = exclCount > 0
+      ? (exclCount + (exclCount === 1 ? ' exceptuado' : ' exceptuados'))
+      : 'Ninguno';
+  }
+
+  listEl.innerHTML = elegibles.map(f => {
+    const p = f.split('-').map(Number);
+    const label = p[2] + '/' + p[1];
+    const isExcluded = exclSet.has(f);
+    return '<button type="button" onclick="toggleHbExcludedDay_(\'' + f + '\')" class="hb-day-chip' + (isExcluded ? ' excluded' : '') + '">' +
+      (isExcluded ? '✕ ' : '') + label +
+      '</button>';
+  }).join('');
+}
+
+function toggleHbExcludedDay_(fechaISO) {
+  const fecha = String(fechaISO || '').trim();
+  if (!fecha) return;
+  const actual = new Set(getDiasExcluidosEnPeriodo_(hbDraftDiasExcluidos_));
+  if (actual.has(fecha)) {
+    actual.delete(fecha);
+  } else {
+    actual.add(fecha);
+    if (getDiasActivos_(Array.from(actual)).length < 1) {
+      showAppToast('Tenés que dejar al menos 1 día activo', true);
+      return;
+    }
+  }
+  hbDraftDiasExcluidos_ = normalizarDiasExcluidosLocal_(Array.from(actual));
+  renderHbExcludedDaysSelector_();
+  sincronizarPlaceholdersHbModal_();
+  actualizarResumenHbModal_();
+}
+
 function sincronizarPlaceholdersHbModal_() {
-  const diasCount = (appState.diasRestantes || []).length;
+  const modal = document.getElementById('hb-modal');
+  const modalAbierto = !!(modal && !modal.classList.contains('hidden'));
+  const exclFuente = modalAbierto ? hbDraftDiasExcluidos_ : appState.diasExcluidos;
+  const diasCount = getDiasActivos_(exclFuente).length;
+  const exclCount = getDiasExcluidosEnPeriodo_(exclFuente).length;
   const diasLabel = document.getElementById('hb-days-label');
   if (diasLabel) {
-    diasLabel.textContent = 'Quedan ' + diasCount + ' días hasta el cobro';
+    diasLabel.textContent = exclCount > 0
+      ? ('Quedan ' + diasCount + (diasCount === 1 ? ' día activo' : ' días activos') + ' (' + exclCount + (exclCount === 1 ? ' exceptuado' : ' exceptuados') + ' hasta el cobro)')
+      : ('Quedan ' + diasCount + ' días hasta el cobro');
   }
 
   const elHb = document.getElementById('hb-update-amount');
@@ -1179,14 +1302,16 @@ function obtenerMontoInputOActual_(inputId, fallbackVal) {
 function actualizarResumenHbModal_() {
   const hbEfectivo = obtenerMontoInputOActual_('hb-update-amount', appState.homeBankingTotal);
   const bolsaEfectiva = obtenerMontoInputOActual_('hb-bolsa-input', appState.bolsaTotal);
-  const diasCount = (appState.diasRestantes || []).length;
+  const diasCount = getDiasActivos_(hbDraftDiasExcluidos_).length;
 
   const disponibleLiquido = hbEfectivo - bolsaEfectiva;
   const presupuestoSimple = diasCount > 0 ? disponibleLiquido / diasCount : 0;
 
   const hoyStr = hoyISO_();
-  const compEfectiva = calcularComposicion_(hbEfectivo, bolsaEfectiva);
-  const disponibleHoy = compEfectiva.objetivoBase - (compEfectiva.gastosPorFecha[hoyStr] || 0);
+  const compEfectiva = calcularComposicion_(hbEfectivo, bolsaEfectiva, hbDraftDiasExcluidos_);
+  const disponibleHoy = esDiaExcluido_(hoyStr, hbDraftDiasExcluidos_)
+    ? 0
+    : (compEfectiva.objetivoBase - (compEfectiva.gastosPorFecha[hoyStr] || 0));
 
   const simpleEl = document.getElementById('hb-preview-daily-simple');
   const hoyEl = document.getElementById('hb-preview-today-left');
@@ -1197,14 +1322,18 @@ function actualizarResumenHbModal_() {
 function refrescarVistaHbModalSiAbierto_() {
   const modal = document.getElementById('hb-modal');
   if (!modal || modal.classList.contains('hidden')) return;
+  renderHbExcludedDaysSelector_();
   sincronizarPlaceholdersHbModal_();
   actualizarResumenHbModal_();
 }
 
 function prepararHbModal_() {
-  sincronizarPlaceholdersHbModal_();
+  hbDraftDiasExcluidos_ = getDiasExcluidosEnPeriodo_().slice();
+  resetLimpiarConfirm_();
   setMoneyValue('hb-update-amount', '');
   setMoneyValue('hb-bolsa-input', '');
+  renderHbExcludedDaysSelector_();
+  sincronizarPlaceholdersHbModal_();
   actualizarResumenHbModal_();
 }
 
@@ -1212,11 +1341,14 @@ attachMoneyInput('hb-update-amount', actualizarResumenHbModal_);
 attachMoneyInput('hb-bolsa-input', actualizarResumenHbModal_);
 attachMoneyInput('tx-amount', () => {});
 
-function aplicarYGuardarHbYBolsa_(finalHb, finalBolsa) {
+function aplicarYGuardarHbYBolsa_(finalHb, finalBolsa, finalExcluidos) {
   ++diarioLoadToken_;
 
   appState.homeBankingTotal = finalHb;
   appState.bolsaTotal = finalBolsa;
+  if (finalExcluidos !== undefined) {
+    appState.diasExcluidos = normalizarDiasExcluidosLocal_(finalExcluidos);
+  }
   setMoneyValue('hb-update-amount', '');
   setMoneyValue('hb-bolsa-input', '');
   guardarCacheDiarioLocal_();
@@ -1225,20 +1357,21 @@ function aplicarYGuardarHbYBolsa_(finalHb, finalBolsa) {
 
   callBackendBackground('actualizarHB', {
     homeBankingTotal: appState.homeBankingTotal,
-    bolsaTotal: appState.bolsaTotal
+    bolsaTotal: appState.bolsaTotal,
+    diasExcluidos: appState.diasExcluidos
   }).catch(err => console.error('Error al actualizar Home Banking:', err));
 }
 
 async function saveHbAmount() {
   const finalHb = obtenerMontoInputOActual_('hb-update-amount', appState.homeBankingTotal);
   const finalBolsa = obtenerMontoInputOActual_('hb-bolsa-input', appState.bolsaTotal);
-  aplicarYGuardarHbYBolsa_(finalHb, finalBolsa);
+  aplicarYGuardarHbYBolsa_(finalHb, finalBolsa, hbDraftDiasExcluidos_);
   showAppToast('Saldo actualizado');
 }
 
 async function handleVaciarBolsaAhorro() {
   const finalHb = obtenerMontoInputOActual_('hb-update-amount', appState.homeBankingTotal);
-  aplicarYGuardarHbYBolsa_(finalHb, 0);
+  aplicarYGuardarHbYBolsa_(finalHb, 0, hbDraftDiasExcluidos_);
   showAppToast('Ahorros pasados al presupuesto');
 }
 
@@ -1269,66 +1402,45 @@ function initOutsideCardTapToClose_() {
 }
 
 // ============================================================
-// "LIMPIAR MOVIMIENTOS PENDIENTES"
+// "LIMPIAR GASTOS REGISTRADOS"
 // ============================================================
 
-async function handleLimpiarPendientes() {
-  mostrarSyncToast_();
-  try {
-    const resultado = await callBackend('limpiarMovimientosPendientes', {});
-    await recargarEstadoDiario_(false);
-    limpiarColaCandidatos = (resultado.candidatos || []).slice();
-    procesarSiguienteCandidato_();
-  } catch (e) {
-    showAppToast('Error al limpiar movimientos', true);
-  } finally {
-    ocultarSyncToast_();
+function resetLimpiarConfirm_() {
+  if (limpiarConfirmTimer_) {
+    clearTimeout(limpiarConfirmTimer_);
+    limpiarConfirmTimer_ = null;
   }
+  limpiarConfirmArmado_ = false;
+  const btn = document.getElementById('btn-limpiar-gastos');
+  if (btn) btn.textContent = 'Limpiar gastos registrados';
 }
 
-function procesarSiguienteCandidato_() {
-  if (!limpiarColaCandidatos.length) {
-    renderMicroView();
-    refrescarVistaHbModalSiAbierto_();
-    showAppToast('Movimientos pendientes limpiados');
+async function handleLimpiarPendientes() {
+  const btn = document.getElementById('btn-limpiar-gastos');
+  if (!limpiarConfirmArmado_) {
+    limpiarConfirmArmado_ = true;
+    if (btn) btn.textContent = '¿Borrar todos los gastos? Tocá de nuevo para confirmar';
+    if (limpiarConfirmTimer_) clearTimeout(limpiarConfirmTimer_);
+    limpiarConfirmTimer_ = setTimeout(() => resetLimpiarConfirm_(), 4000);
     return;
   }
-  const candidato = limpiarColaCandidatos[0];
-  const desc = document.getElementById('limpiar-candidato-desc');
-  if (desc) {
-    desc.textContent = (candidato.descripcion || 'Gasto divisible') + ' — ' +
-      formatearMoneda_(candidato.monto) + ' en total';
-  }
-  document.getElementById('limpiar-candidato-modal').classList.add('active');
-  pushModalHistory_('limpiar-candidato-modal');
-}
 
-async function resolverCandidatoLimpiar(accion) {
-  const candidato = limpiarColaCandidatos.shift();
-  document.getElementById('limpiar-candidato-modal').classList.remove('active');
+  resetLimpiarConfirm_();
+  ++diarioLoadToken_;
+  appState.movimientos = [];
+  guardarCacheDiarioLocal_();
+  renderMicroView();
+  refrescarVistaHbModalSiAbierto_();
 
   mostrarSyncToast_();
   try {
-    if (accion === 'borrar') {
-      await callBackend('eliminarMovimiento', { id: candidato.id, silencioso: true });
-    } else if (accion === 'single') {
-      await callBackend('guardarMovimiento', {
-        id: candidato.id,
-        tipo: 'single',
-        fechasAfectadas: [hoyISO_()],
-        monto: candidato.montoPorFecha,
-        descripcion: candidato.descripcion,
-        usuario: candidato.usuario,
-        fromBag: candidato.fromBag,
-        silencioso: true
-      });
-    }
+    await callBackend('limpiarMovimientosPendientes', {});
     await recargarEstadoDiario_(false);
+    showAppToast('Gastos limpiados · Presupuesto recalculado');
   } catch (e) {
-    showAppToast('Error al procesar movimiento pendiente', true);
+    showAppToast('Error al limpiar gastos', true);
   } finally {
     ocultarSyncToast_();
-    procesarSiguienteCandidato_();
   }
 }
 
@@ -1390,7 +1502,18 @@ async function chequearCierreDia_() {
   if (appState.lastProcessedDate === hoyStr) return;
   if (appState.lastProcessedDate > hoyStr) return;
 
-  const ventana = [appState.lastProcessedDate].concat(appState.diasRestantes);
+  if (esDiaExcluido_(appState.lastProcessedDate)) {
+    try {
+      const resultado = await callBackendConSync('resolverCierreDia', { decision: 'redistribuir', tipo: 'sobrante', monto: 0 });
+      appState.lastProcessedDate = normalizarFechaConfig_(resultado.lastProcessedDate, hoyISO_());
+      guardarCacheDiarioLocal_();
+    } catch (e) {
+      console.error('Error al cerrar día exceptuado:', e);
+    }
+    return;
+  }
+
+  const ventana = [appState.lastProcessedDate].concat(getDiasActivos_());
   const liquidHB = appState.homeBankingTotal - appState.bolsaTotal;
   const gastosPorFecha = {};
   ventana.forEach(f => { gastosPorFecha[f] = 0; });
@@ -1811,7 +1934,8 @@ async function handleFormSubmit() {
         fechasAfectadas.push(formatearFechaISOLocal_(new Date(base.getFullYear(), base.getMonth(), base.getDate() + i)));
       }
     } else {
-      fechasAfectadas = appState.diasRestantes.slice();
+      const activos = getDiasActivos_();
+      fechasAfectadas = activos.length ? activos.slice() : appState.diasRestantes.slice();
     }
   }
 
@@ -1907,8 +2031,10 @@ async function triggerSyncReload() {
 function openBudgetAuditModal(targetDay) {
   const fecha = targetDay === 'tomorrow' ? formatearFechaISOLocal_(sumarDiasLocal_(new Date(), 1)) : hoyISO_();
   const comp = calcularComposicion_();
-  const gastoDelDia = comp.gastosPorFecha[fecha] || 0;
-  const disponible = comp.objetivoBase - gastoDelDia;
+  const excluido = esDiaExcluido_(fecha);
+  const gastoDelDia = excluido ? (comp.gastosTodosPorFecha[fecha] || 0) : (comp.gastosPorFecha[fecha] || 0);
+  const baseDia = excluido ? 0 : comp.objetivoBase;
+  const disponible = excluido ? 0 : (comp.objetivoBase - gastoDelDia);
 
   const auditTitle = document.getElementById('audit-title');
   const auditSubtitle = document.getElementById('audit-subtitle');
@@ -1922,8 +2048,8 @@ function openBudgetAuditModal(targetDay) {
   });
 
   let html = '<div class="flex justify-between items-baseline py-2 border-b border-white/20">' +
-    '<span class="text-base font-bold text-white">Presupuesto base:</span>' +
-    '<span class="text-base font-bold text-white">' + formatearMoneda_(comp.objetivoBase) + '</span></div>';
+    '<span class="text-base font-bold text-white">' + (excluido ? 'Presupuesto base (exceptuado):' : 'Presupuesto base:') + '</span>' +
+    '<span class="text-base font-bold text-white">' + formatearMoneda_(baseDia) + '</span></div>';
 
   if (movimientosDelDia.length) {
     html += movimientosDelDia.map(m => {
@@ -2008,8 +2134,9 @@ function renderFutureDaysList_() {
   }
 
   cont.innerHTML = futuros.map(fecha => {
-    const gasto = comp.gastosPorFecha[fecha] || 0;
-    const disponible = comp.objetivoBase - gasto;
+    const excluido = esDiaExcluido_(fecha);
+    const gasto = excluido ? (comp.gastosTodosPorFecha[fecha] || 0) : (comp.gastosPorFecha[fecha] || 0);
+    const disponible = excluido ? 0 : (comp.objetivoBase - gasto);
     const movs = appState.movimientos.filter(m => {
       if (m.fromBag) return false;
       const fechas = normalizarFechas_(m.fechasAfectadas);
@@ -2024,11 +2151,18 @@ function renderFutureDaysList_() {
         '</div>';
     }
 
-    return '<div class="py-2.5 border-b border-white/15">' +
-      '<div class="flex justify-between items-baseline">' +
-      '<div><span class="font-bold text-white text-sm block capitalize">' + formatearFechaLegible_(fecha) + '</span>' +
-      '<span class="text-[11px] text-white/70">' + (gasto > 0 ? ('Gastados: ' + formatearMoneda_(gasto)) : 'Sin consumos asignados') + '</span></div>' +
-      '<span class="font-bold text-base text-white">' + formatearMoneda_(disponible) + '</span></div>' + detalle + '</div>';
+    const subtexto = excluido
+      ? (gasto > 0 ? ('Exceptuado · Consumos: ' + formatearMoneda_(gasto)) : 'Sin presupuesto asignado (tarjeta)')
+      : (gasto > 0 ? ('Gastados: ' + formatearMoneda_(gasto)) : 'Sin consumos asignados');
+    const badgeExcl = excluido
+      ? '<span class="ml-1.5 inline-block px-2 py-0.5 rounded-full bg-white/15 text-[10px] font-bold uppercase tracking-wide text-white/90">Exceptuado</span>'
+      : '';
+
+    return '<div class="py-2.5 border-b border-white/15' + (excluido ? ' opacity-65' : '') + '">' +
+      '<div class="flex justify-between items-baseline gap-2">' +
+      '<div><div class="flex items-center flex-wrap"><span class="font-bold text-white text-sm capitalize' + (excluido ? ' line-through' : '') + '">' + formatearFechaLegible_(fecha) + '</span>' + badgeExcl + '</div>' +
+      '<span class="text-[11px] text-white/70">' + subtexto + '</span></div>' +
+      '<span class="font-bold text-base text-white shrink-0">' + formatearMoneda_(disponible) + '</span></div>' + detalle + '</div>';
   }).join('');
 }
 
@@ -2458,6 +2592,7 @@ function cargarCacheDiarioLocal_() {
   if (parsed.bolsaTotal !== undefined) appState.bolsaTotal = parsed.bolsaTotal;
   if (parsed.diaCobro !== undefined) appState.diaCobro = parsed.diaCobro;
   if (Array.isArray(parsed.diasRestantes)) appState.diasRestantes = parsed.diasRestantes;
+  if (Array.isArray(parsed.diasExcluidos)) appState.diasExcluidos = normalizarDiasExcluidosLocal_(parsed.diasExcluidos);
   if (Array.isArray(parsed.movimientos)) appState.movimientos = parsed.movimientos;
   if (Array.isArray(parsed.listaCompras)) appState.listaCompras = normalizarListaCompras_(parsed.listaCompras);
   if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = parsed.lastProcessedDate;
@@ -2471,6 +2606,7 @@ function aplicarEstadoDiario_(data) {
   appState.bolsaTotal = data.bolsaTotal;
   appState.diaCobro = data.diaCobro;
   appState.diasRestantes = data.diasRestantes;
+  appState.diasExcluidos = normalizarDiasExcluidosLocal_(data.diasExcluidos);
   appState.movimientos = (data.movimientos || []).map(m => {
     m.fechasAfectadas = normalizarFechas_(m.fechasAfectadas);
     return m;

@@ -324,10 +324,24 @@
               </div>
             </div>
 
-            <!-- Enlace limpiar pendientes -->
+            <!-- Días exceptuados de la distribución (desde el 28 hasta antes del cobro) -->
+            <div id="hb-excluded-days-section" class="pt-2 space-y-2 hidden">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-bold uppercase tracking-wider text-white/90">
+                  Exceptuar días (tarjeta)
+                </span>
+                <span id="hb-excluded-count-label" class="text-[11px] theme-text-muted"></span>
+              </div>
+              <p class="text-[11px] theme-text-muted opacity-85">
+                Tocá los días desde el 28 hasta antes de cobrar que no quieras incluir en el presupuesto diario.
+              </p>
+              <div id="hb-excluded-days-list" class="flex flex-wrap gap-1.5"></div>
+            </div>
+
+            <!-- Enlace limpiar gastos -->
             <div class="pt-3 text-center">
-              <button type="button" onclick="handleLimpiarPendientes()" class="text-xs font-normal text-white underline hover:opacity-80">
-                Limpiar gastos anteriores
+              <button type="button" id="btn-limpiar-gastos" onclick="handleLimpiarPendientes()" class="text-xs font-normal text-white underline hover:opacity-80 transition-colors">
+                Limpiar gastos registrados
               </button>
             </div>
           </div>
@@ -430,27 +444,7 @@
   </div>
 
   <!-- ============================================================ -->
-  <!-- MODAL FLOTANTE 2: RESOLVER GASTO PENDIENTE                   -->
-  <!-- ============================================================ -->
-  <div id="limpiar-candidato-modal" class="modal-overlay">
-    <div class="modal-sheet p-6 text-center space-y-4">
-      <h3 class="text-base font-black theme-text-primary">Gasto pendiente</h3>
-      <p id="limpiar-candidato-desc" class="text-xs text-zinc-600"></p>
-      <div class="flex gap-2 pt-2">
-        <button onclick="resolverCandidatoLimpiar('borrar')"
-          class="flex-1 py-2.5 rounded-xl bg-rose-600 text-white font-bold text-xs">
-          Eliminar
-        </button>
-        <button onclick="resolverCandidatoLimpiar('single')"
-          class="flex-1 py-2.5 rounded-xl theme-bg-primary text-white font-bold text-xs">
-          Pasar a hoy
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ============================================================ -->
-  <!-- MODAL FLOTANTE 3: SELECTOR DE PALETA DE COLORES POR USUARIO  -->
+  <!-- MODAL FLOTANTE 2: SELECTOR DE PALETA DE COLORES POR USUARIO  -->
   <!-- ============================================================ -->
   <div id="palette-modal" class="modal-overlay" onclick="if (event.target === this) closePaletteModal()">
     <div class="modal-sheet p-6 space-y-4">

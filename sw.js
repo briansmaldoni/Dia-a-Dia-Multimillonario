@@ -1,4 +1,4 @@
-const CACHE_NAME = 'multimillonarios-cache-v46';
+const CACHE_NAME = 'multimillonarios-cache-v47';
 
 self.addEventListener('install', e => {
   e.waitUntil(

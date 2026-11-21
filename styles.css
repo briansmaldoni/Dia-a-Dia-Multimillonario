@@ -25,11 +25,6 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-html,
-body {
-  overscroll-behavior-y: contain;
-}
-
 body {
   background-color: var(--color-bg-desktop);
   color: #18181b;
@@ -73,8 +68,7 @@ button {
   position: relative;
   display: flex;
   flex-direction: column;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow-x: clip;
   padding-top: env(safe-area-inset-top, 0px);
   padding-bottom: 0;
   transition: background-color 0.25s ease;
@@ -86,6 +80,7 @@ button {
     box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.05);
     min-height: 917px;
     height: 917px;
+    overflow-y: auto;
   }
 }
 
@@ -321,6 +316,30 @@ button {
   pointer-events: none;
   transition: opacity 0.25s ease;
   z-index: 500;
+  overscroll-behavior-y: contain;
+}
+
+.hb-day-chip {
+  padding: 6px 11px;
+  border-radius: 9999px;
+  border: 1.5px solid rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+  transition: all 0.15s ease;
+}
+
+.hb-day-chip:active {
+  transform: scale(0.95);
+}
+
+.hb-day-chip.excluded {
+  background: #ffffff;
+  color: var(--color-primary);
+  border-color: #ffffff;
+  text-decoration: line-through;
 }
 
 @media (min-width: 640px) {

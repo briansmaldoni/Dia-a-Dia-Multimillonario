@@ -511,8 +511,13 @@ function calcularDiasRestantes_(desde, feriadosExtra) {
 function getEstadoDiario_() {
   const cfg = leerConfig_();
   const feriadosExtra = leerFilas_('Feriados');
-  const diasInfo = calcularDiasRestantes_(new Date(), feriadosExtra);
+  const hoy = new Date();
+  const diasInfo = calcularDiasRestantes_(hoy, feriadosExtra);
   const movimientos = leerFilas_('Movimientos').map(limpiarFilaParaCliente_);
+
+  const ayerStr = formatearFechaISO_(sumarDias_(hoy, -1));
+  const rawExcluidos = normalizarDiasExcluidos_(parseJsonConfig_(cfg.diasExcluidos));
+  const diasExcluidos = rawExcluidos.filter(f => diasInfo.fechas.indexOf(f) !== -1 || f === ayerStr);
 
   const listaRaw = parseJsonConfig_(cfg.listaCompras);
   const hasBrianWa = !!(String(cfg.greenApiId_Brian || '').trim() && String(cfg.greenApiToken_Brian || '').trim());
@@ -525,6 +530,7 @@ function getEstadoDiario_() {
     lastProcessedDate: cfg.lastProcessedDate || null,
     diaCobro: diasInfo.diaCobro,
     diasRestantes: diasInfo.fechas,
+    diasExcluidos: diasExcluidos,
     movimientos: movimientos,
     listaCompras: Array.isArray(listaRaw) ? listaRaw : [],
     whatsappConfigured: whatsappConfigured
@@ -670,54 +676,31 @@ function actualizarHB_(payload) {
     if (isNaN(bolsa) || bolsa < 0) throw new Error('bolsaTotal inválido');
     cambios.bolsaTotal = bolsa;
   }
+  if (payload && Array.isArray(payload.diasExcluidos)) {
+    const excluidosLimpios = normalizarDiasExcluidos_(payload.diasExcluidos);
+    cambios.diasExcluidos = JSON.stringify(excluidosLimpios);
+  }
   if (Object.keys(cambios).length > 0) {
     setConfigValores_(cambios);
   }
   const cfg = leerConfig_();
   return {
     homeBankingTotal: getConfigNumero_(cfg, 'homeBankingTotal', 0),
-    bolsaTotal: getConfigNumero_(cfg, 'bolsaTotal', 0)
+    bolsaTotal: getConfigNumero_(cfg, 'bolsaTotal', 0),
+    diasExcluidos: normalizarDiasExcluidos_(parseJsonConfig_(cfg.diasExcluidos))
   };
 }
 
 function limpiarMovimientosPendientes_() {
-  const hoyStr = formatearFechaISO_(new Date());
-  const movimientos = leerFilas_('Movimientos');
-  const aBorrar = [];
-  const candidatos = [];
-
-  const cfg = leerConfig_();
-  let hbTotal = getConfigNumero_(cfg, 'homeBankingTotal', 0);
-  let bolsaTotal = getConfigNumero_(cfg, 'bolsaTotal', 0);
-  let cambioHB = false;
-
-  movimientos.forEach(m => {
-    const fechas = castValor_('Movimientos', 'fechasAfectadas', m.fechasAfectadas);
-    const afectaHoy = fechas.indexOf(hoyStr) !== -1;
-    const tienePendiente = fechas.some(f => f >= hoyStr);
-
-    if (!tienePendiente) {
-      aBorrar.push(m.id);
-      return;
-    }
-    if (m.tipo === 'single' && afectaHoy) return;
-    if (m.tipo === 'divisible' && afectaHoy) {
-      candidatos.push(limpiarFilaParaCliente_(m));
-      return;
-    }
-    
-    hbTotal += (m.monto || 0);
-    if (m.fromBag) bolsaTotal += (m.monto || 0);
-    cambioHB = true;
-    aBorrar.push(m.id);
-  });
-
-  if (cambioHB) {
-    setConfigValores_({ homeBankingTotal: hbTotal, bolsaTotal: bolsaTotal });
+  const sheet = getSheet_('Movimientos', true);
+  const lastRow = sheet.getLastRow();
+  const borrados = Math.max(0, lastRow - 1);
+  if (borrados > 0) {
+    sheet.deleteRows(2, borrados);
+    SpreadsheetApp.flush();
+    invalidarCacheSheet_('Movimientos');
   }
-
-  aBorrar.forEach(id => borrarFilaPorId_('Movimientos', id));
-  return { borrados: aBorrar.length, candidatos: candidatos };
+  return { borrados: borrados, candidatos: [] };
 }
 
 function resolverCierreDia_(payload) {
@@ -751,6 +734,24 @@ function parseJsonConfig_(rawVal) {
   } catch (e) {
     return null;
   }
+}
+
+function normalizarDiasExcluidos_(raw) {
+  let lista = raw;
+  if (typeof lista === 'string') {
+    lista = parseJsonConfig_(lista);
+  }
+  if (!Array.isArray(lista)) return [];
+  const seen = {};
+  return lista
+    .map(f => String(f || '').trim())
+    .filter(f => /^\d{4}-\d{2}-\d{2}$/.test(f))
+    .filter(f => {
+      if (seen[f]) return false;
+      seen[f] = true;
+      return true;
+    })
+    .sort();
 }
 
 function formatearMonedaGS_(n) {
