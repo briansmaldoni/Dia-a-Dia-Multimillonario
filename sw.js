@@ -1,4 +1,4 @@
-const CACHE_NAME = 'multimillonarios-cache-v51';
+const CACHE_NAME = 'multimillonarios-cache-v52';
 const FONT_CACHE_NAME = 'multimillonarios-fonts-v1';
 const PRECACHE_URLS = [
   './',

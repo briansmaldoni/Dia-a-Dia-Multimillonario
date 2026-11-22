@@ -1593,10 +1593,6 @@ function obtenerMontoInputOActual_(inputId, fallbackVal) {
 function actualizarResumenHbModal_() {
   const hbEfectivo = obtenerMontoInputOActual_('hb-update-amount', appState.homeBankingTotal);
   const bolsaEfectiva = obtenerMontoInputOActual_('hb-bolsa-input', appState.bolsaTotal);
-  const diasCount = getDiasActivos_(hbDraftDiasExcluidos_).length;
-
-  const disponibleLiquido = hbEfectivo - bolsaEfectiva;
-  const presupuestoSimple = diasCount > 0 ? disponibleLiquido / diasCount : 0;
 
   const hoyStr = hoyISO_();
   const compEfectiva = calcularComposicion_(hbEfectivo, bolsaEfectiva, hbDraftDiasExcluidos_);
@@ -1606,7 +1602,7 @@ function actualizarResumenHbModal_() {
 
   const simpleEl = document.getElementById('hb-preview-daily-simple');
   const hoyEl = document.getElementById('hb-preview-today-left');
-  if (simpleEl) simpleEl.textContent = formatearMoneda_(presupuestoSimple);
+  if (simpleEl) simpleEl.textContent = formatearMoneda_(compEfectiva.objetivoBase);
   if (hoyEl) hoyEl.textContent = formatearMoneda_(disponibleHoy);
 }
 
