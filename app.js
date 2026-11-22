@@ -99,6 +99,10 @@ function isRetryableBackendError_(err) {
 }
 
 function openAccessKeyModal_(errorMsg) {
+  const splashEl = document.getElementById('app-splash-screen');
+  if (splashEl) {
+    splashEl.classList.add('splash-hidden', 'hidden');
+  }
   const modal = document.getElementById('access-key-modal');
   const errEl = document.getElementById('access-key-error');
   const inputEl = document.getElementById('access-key-input');
@@ -113,7 +117,6 @@ function openAccessKeyModal_(errorMsg) {
   }
   if (modal && !modal.classList.contains('active')) {
     modal.classList.add('active');
-    syncPullToRefreshGuard_();
   }
   if (inputEl && typeof inputEl.focus === 'function') {
     setTimeout(() => {
@@ -133,7 +136,7 @@ function closeAccessKeyModal_() {
   if (inputEl) inputEl.value = '';
   if (modal) modal.classList.remove('active');
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  maybeApplyPendingSwReload_();
 }
 
 function handleAuthFailure_(err) {
@@ -237,7 +240,7 @@ async function fetchWithRetry(url, options, maxRetries = 3, timeoutMs = 35000) {
   }
 }
 
-async function callBackend(action, payload) {
+async function callBackend(action, payload, opts) {
   const accessKey = getStoredAccessKey_();
   if (!accessKey) {
     const authErr = createApiError_({ ok: false, code: 'UNAUTHORIZED', error: 'Ingresá tu clave de acceso para continuar.' });
@@ -245,11 +248,14 @@ async function callBackend(action, payload) {
     throw authErr;
   }
 
+  const maxRetries = (opts && typeof opts.maxRetries === 'number') ? opts.maxRetries : 3;
+  const timeoutMs = (opts && typeof opts.timeoutMs === 'number') ? opts.timeoutMs : 35000;
+
   const res = await fetchWithRetry(BACKEND_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ action: action, payload: payload || {}, accessKey: accessKey })
-  }, 3, 35000);
+  }, maxRetries, timeoutMs);
   const json = await res.json();
   if (!json.ok) {
     const apiErr = createApiError_(json, 'Error en ' + action);
@@ -261,10 +267,10 @@ async function callBackend(action, payload) {
   return json.data;
 }
 
-async function callBackendConSync(action, payload) {
+async function callBackendConSync(action, payload, opts) {
   mostrarSyncToast_();
   try {
-    return await callBackend(action, payload);
+    return await callBackend(action, payload, opts);
   } finally {
     ocultarSyncToast_();
   }
@@ -302,13 +308,15 @@ function enqueuePendingSync_(action, payload) {
   const idSuffix = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
     ? crypto.randomUUID()
     : (Date.now() + '_' + Math.random().toString(36).slice(2, 8));
+  const syncId = 'sync_' + idSuffix;
   queue.push({
-    id: 'sync_' + idSuffix,
+    id: syncId,
     action: action,
     payload: payload,
     timestamp: Date.now()
   });
   savePendingSyncQueue_(queue);
+  return syncId;
 }
 
 function isNetworkOrTimeoutError_(err) {
@@ -349,8 +357,21 @@ async function processPendingSyncQueue_() {
       if (!queue.length) break;
       const item = queue[0];
       try {
-        await callBackend(item.action, item.payload);
+        const itemRes = await callBackend(item.action, item.payload);
         savePendingSyncQueue_(getPendingSyncQueue_().filter(x => x.id !== item.id));
+        if (
+          item.action === 'guardarListaCompras' &&
+          itemRes &&
+          Array.isArray(itemRes.listaCompras) &&
+          !hasPendingShoppingBatch_() &&
+          !hasQueuedShoppingSync_()
+        ) {
+          appState.listaCompras = normalizarListaCompras_(itemRes.listaCompras);
+          guardarCacheDiarioLocal_();
+          actualizarBadgeListaCompras_();
+          const shopModal = document.getElementById('shopping-modal');
+          if (shopModal && shopModal.classList.contains('active')) renderShoppingList_();
+        }
       } catch (err) {
         console.error('Error procesando ítem de cola pendiente:', item, err);
         if (isAuthError_(err)) {
@@ -373,6 +394,7 @@ async function processPendingSyncQueue_() {
   } finally {
     isProcessingSyncQueue_ = false;
     ocultarSyncToast_();
+    maybeApplyPendingSwReload_();
   }
 }
 
@@ -408,7 +430,6 @@ async function callBackendBackground(action, payload) {
 
   let failedRetryable = false;
   pendingSyncCount++;
-  syncPullToRefreshGuard_();
   mostrarSyncToast_();
   try {
     const res = await callBackend(action, payload);
@@ -436,9 +457,10 @@ async function callBackendBackground(action, payload) {
       ocultarSyncToast_();
       if (!failedRetryable && !authPaused_ && getStoredAccessKey_() && getPendingSyncQueue_().length > 0 && !isProcessingSyncQueue_) {
         processPendingSyncQueue_();
+      } else {
+        maybeApplyPendingSwReload_();
       }
     }
-    syncPullToRefreshGuard_();
   }
 }
 
@@ -1073,7 +1095,6 @@ function openPaletteModal(user) {
   if (modal) modal.classList.add('active');
   pushOverlayStack_('palette-modal');
   pushModalHistory_('palette-modal');
-  syncPullToRefreshGuard_();
 }
 
 function closePaletteModal() {
@@ -1081,7 +1102,7 @@ function closePaletteModal() {
   const modal = document.getElementById('palette-modal');
   if (modal) modal.classList.remove('active');
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  maybeApplyPendingSwReload_();
 }
 
 function seleccionarPaletaUsuario(paletteId) {
@@ -1206,6 +1227,10 @@ function pintarBotonesUsuario_() {
 
 function setActiveUser(user) {
   const validUser = normalizarUsuarioLocal_(user, 'Brian');
+  const draft = loadShoppingDraft_();
+  if (draft && draft.ops && draft.ops.length && draft.usuario && draft.usuario !== validUser) {
+    flushShoppingBatch_('user_switch');
+  }
   resetTxForm_();
   appState.activeUser = validUser;
   localStorage.setItem('userActive', validUser);
@@ -1480,8 +1505,8 @@ function toggleHbModal(show) {
     }
     if (dash) dash.classList.remove('hidden');
     resetAppScrollToTop_();
+    maybeApplyPendingSwReload_();
   }
-  syncPullToRefreshGuard_();
 }
 
 function renderHbExcludedDaysSelector_() {
@@ -1686,6 +1711,7 @@ async function handleVaciarBolsaAhorro() {
 
 function initOutsideCardTapToClose_() {
   document.addEventListener('click', (e) => {
+    if (Date.now() < ptrSuppressClickUntil_) return;
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
 
@@ -1836,14 +1862,12 @@ function mostrarModalCierreDia_(info) {
   document.getElementById('day-change-btn-bag').textContent = esDeficit ? 'Cubrir con Ahorros' : 'Guardar en Ahorros';
   document.getElementById('day-change-btn-distribute').textContent = 'Repartir en los próximos días';
   document.getElementById('day-change-modal').classList.add('active');
-  syncPullToRefreshGuard_();
 }
 
 async function resolveDayChange(decision) {
   const info = cierreDiaPendiente;
   if (!info) return;
   document.getElementById('day-change-modal').classList.remove('active');
-  syncPullToRefreshGuard_();
 
   if (decision === 'edit_hb') {
     ++diarioLoadToken_;
@@ -1941,7 +1965,9 @@ function setMicroSubView(view, push = true) {
     if (push) pushModalHistory_('micro-subview-add');
   }
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  if (view === 'list') {
+    maybeApplyPendingSwReload_();
+  }
 }
 
 function parseTxCustomDates_() {
@@ -2380,8 +2406,8 @@ function toggleBudgetAuditModal(show) {
     }
     if (dash) dash.classList.remove('hidden');
     resetAppScrollToTop_();
+    maybeApplyPendingSwReload_();
   }
-  syncPullToRefreshGuard_();
 }
 
 function toggleFutureDaysModal(show) {
@@ -2405,8 +2431,8 @@ function toggleFutureDaysModal(show) {
     }
     if (dash) dash.classList.remove('hidden');
     resetAppScrollToTop_();
+    maybeApplyPendingSwReload_();
   }
-  syncPullToRefreshGuard_();
 }
 
 function renderFutureDaysList_() {
@@ -2470,15 +2496,6 @@ function popOverlayStack_(modalId) {
   if (idx !== -1) modalOpenStack_.splice(idx, 1);
 }
 
-function syncPullToRefreshGuard_() {
-  try {
-    const root = document.documentElement;
-    if (!root || !root.classList) return;
-    const block = getCurrentScreenState() !== 'MICRO_HOME' || pendingSyncCount > 0;
-    root.classList.toggle('ptr-blocked', block);
-  } catch (e) {}
-}
-
 function closeAllActiveModalsWithoutSaving_() {
   toggleHbModal(false);
   toggleBudgetAuditModal(false);
@@ -2506,7 +2523,7 @@ function closeAllActiveModalsWithoutSaving_() {
   const microDash = document.getElementById('micro-dashboard-view');
   if (microDash) microDash.classList.remove('hidden');
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  maybeApplyPendingSwReload_();
 }
 
 function closeTopActiveLayer_() {
@@ -2526,7 +2543,7 @@ function closeTopActiveLayer_() {
         popOverlayStack_(topId);
         el.classList.remove('active');
         resetAppScrollToTop_();
-        syncPullToRefreshGuard_();
+        maybeApplyPendingSwReload_();
       }
       return;
     }
@@ -2542,7 +2559,7 @@ function closeTopActiveLayer_() {
     } else {
       top.classList.remove('active');
       resetAppScrollToTop_();
-      syncPullToRefreshGuard_();
+      maybeApplyPendingSwReload_();
     }
     return;
   }
@@ -2985,7 +3002,7 @@ function aplicarEstadoDiario_(data) {
   appState.diasRestantes = normalizarDiasRestantesLocal_(data.diasRestantes);
   appState.diasExcluidos = normalizarDiasExcluidosLocal_(data.diasExcluidos);
   appState.movimientos = normalizarMovimientosLocal_(data.movimientos);
-  if (Array.isArray(data.listaCompras)) {
+  if (Array.isArray(data.listaCompras) && !hasPendingShoppingBatch_() && !hasQueuedShoppingSync_()) {
     appState.listaCompras = normalizarListaCompras_(data.listaCompras);
   }
   appState.lastProcessedDate = normalizarFechaConfig_(data.lastProcessedDate, hoyISO_());
@@ -3001,7 +3018,7 @@ function aplicarEstadoDiario_(data) {
 }
 
 async function recargarEstadoDiario_(conToast) {
-  if (authPaused_ || !getStoredAccessKey_() || pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
+  if (authPaused_ || !getStoredAccessKey_() || pendingSyncCount > 0 || getPendingSyncQueue_().length > 0 || hasPendingShoppingBatch_()) return;
   const miToken = ++diarioLoadToken_;
   try {
     if (!appState.lastProcessedDate && miToken === diarioLoadToken_ && cargarCacheDiarioLocal_()) {
@@ -3011,12 +3028,70 @@ async function recargarEstadoDiario_(conToast) {
 
   try {
     const data = conToast === false ? await callBackend('getEstadoDiario', {}) : await callBackendConSync('getEstadoDiario', {});
-    if (miToken !== diarioLoadToken_ || pendingSyncCount > 0 || getPendingSyncQueue_().length > 0) return;
+    if (miToken !== diarioLoadToken_ || pendingSyncCount > 0 || getPendingSyncQueue_().length > 0 || hasPendingShoppingBatch_()) return;
     aplicarEstadoDiario_(data);
   } catch (err) {
     if (miToken === diarioLoadToken_) {
       console.error('Error al recargar estado diario:', err);
     }
+  }
+}
+
+async function manualRefreshDiario_() {
+  if (isManualRefreshing_) return false;
+  isManualRefreshing_ = true;
+  try {
+    if (!getStoredAccessKey_() || authPaused_) {
+      openAccessKeyModal_('Ingresá tu clave de acceso para actualizar.');
+      return false;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      showAppToast('Sin conexión a internet', true);
+      return false;
+    }
+
+    if (hasPendingShoppingBatch_()) {
+      await flushShoppingBatch_('manual_refresh');
+    }
+    if (getPendingSyncQueue_().length > 0) {
+      await processPendingSyncQueue_();
+    }
+    if (authPaused_ || getPendingSyncQueue_().length > 0 || hasPendingShoppingBatch_()) {
+      showAppToast('Quedan cambios pendientes de sincronizar', true);
+      return false;
+    }
+
+    if (swRegistration_ && typeof swRegistration_.update === 'function') {
+      swRegistration_.update().catch(() => {});
+    }
+
+    const miToken = ++diarioLoadToken_;
+    const data = await callBackend('getEstadoDiario', {}, { maxRetries: 1, timeoutMs: 15000 });
+    if (
+      miToken !== diarioLoadToken_ ||
+      authPaused_ ||
+      pendingSyncCount > 0 ||
+      getPendingSyncQueue_().length > 0 ||
+      hasPendingShoppingBatch_()
+    ) {
+      return false;
+    }
+    aplicarEstadoDiario_(data);
+    try {
+      await chequearCierreDia_();
+    } catch (e) {
+      console.error('Error al chequear el cierre de día tras actualizar:', e);
+    }
+    showAppToast('Actualizado', false, 1800);
+    return true;
+  } catch (err) {
+    console.error('Error en actualización manual:', err);
+    if (!isAuthError_(err)) {
+      showAppToast('No se pudo actualizar. Intentá de nuevo.', true);
+    }
+    return false;
+  } finally {
+    isManualRefreshing_ = false;
   }
 }
 
@@ -3028,6 +3103,8 @@ async function bootstrapEstado_() {
       actualizarBadgeListaCompras_();
     }
   } catch (e) {}
+
+  enqueuePendingShoppingDraftForRecovery_();
 
   if (!getStoredAccessKey_()) {
     authPaused_ = true;
@@ -3042,7 +3119,7 @@ async function bootstrapEstado_() {
 
   try {
     const data = await callBackendConSync('getEstadoDiario', {});
-    if (miToken !== diarioLoadToken_ || authPaused_ || getPendingSyncQueue_().length > 0) return;
+    if (miToken !== diarioLoadToken_ || authPaused_ || getPendingSyncQueue_().length > 0 || hasPendingShoppingBatch_()) return;
     aplicarEstadoDiario_(data);
 
     try {
@@ -3159,7 +3236,6 @@ function openMessageModal() {
   pushOverlayStack_('message-modal');
   pushModalHistory_('message-modal');
   updateFloatingCircleButtonsPosition();
-  syncPullToRefreshGuard_();
 }
 
 function closeMessageModal() {
@@ -3170,7 +3246,7 @@ function closeMessageModal() {
   if (modal) modal.classList.remove('active');
   updateFloatingCircleButtonsPosition();
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  maybeApplyPendingSwReload_();
 }
 
 function seleccionarMensajeRapido(idx) {
@@ -3271,6 +3347,9 @@ async function enviarListaComprasWhatsApp() {
   const payload = { de: appState.activeUser };
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    if (hasPendingShoppingBatch_()) {
+      await flushShoppingBatch_('whatsapp_send_list');
+    }
     callBackendBackground('enviarListaComprasWhatsApp', payload);
     closeMessageModal();
     return true;
@@ -3283,6 +3362,12 @@ async function enviarListaComprasWhatsApp() {
   }
 
   try {
+    if (hasPendingShoppingBatch_()) {
+      await flushShoppingBatch_('whatsapp_send_list');
+    }
+    if (getPendingSyncQueue_().length > 0 && !authPaused_ && getStoredAccessKey_()) {
+      await processPendingSyncQueue_();
+    }
     const res = await callBackend('enviarListaComprasWhatsApp', payload);
     closeMessageModal();
     const wa = res && res.whatsapp ? res.whatsapp : null;
@@ -3316,8 +3401,15 @@ async function enviarListaComprasWhatsApp() {
 function solicitarRecargaSuave_() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (hasPendingShoppingBatch_()) return;
   if (pendingSyncCount === 0 && getPendingSyncQueue_().length > 0 && !isProcessingSyncQueue_ && !authPaused_ && getStoredAccessKey_()) {
-    processPendingSyncQueue_();
+    processPendingSyncQueue_()
+      .then(() => {
+        if (!authPaused_ && getPendingSyncQueue_().length === 0 && !hasPendingShoppingBatch_()) {
+          return recargarEstadoDiario_(false);
+        }
+      })
+      .catch(() => {});
     return;
   }
   if (pendingSyncCount > 0 || getPendingSyncQueue_().length > 0 || isReloadingDiario_) return;
@@ -3339,7 +3431,17 @@ function initAutoSyncRefresh_() {
 
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-      solicitarRecargaSuave_();
+      if (document.visibilityState === 'hidden') {
+        flushShoppingBatch_('visibility_hidden', { useKeepalive: true });
+      } else {
+        solicitarRecargaSuave_();
+      }
+    });
+  }
+
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', () => {
+      flushShoppingBatch_('pagehide', { useKeepalive: true });
     });
   }
 }
@@ -3363,13 +3465,18 @@ function normalizarListaCompras_(raw) {
   return raw.map(it => {
     if (!it || typeof it !== 'object') return null;
     const id = String(it.id || '').trim();
-    const texto = String(it.texto || '').trim().slice(0, 120);
+    const texto = String(it.texto || '')
+      .replace(/[\r\n\t]+/g, ' ')
+      .trim()
+      .slice(0, 120)
+      .replace(/^[\s=+\-@]+/, '')
+      .trim();
     if (!id || !texto) return null;
     return {
       id: id,
       texto: texto,
       done: !!it.done,
-      autor: String(it.autor || '').trim() || 'Brian',
+      autor: normalizarUsuarioLocal_(String(it.autor || '').trim(), 'Brian'),
       creadoEn: String(it.creadoEn || '')
     };
   }).filter(Boolean);
@@ -3435,26 +3542,174 @@ function renderShoppingList_() {
   actualizarBadgeListaCompras_();
 }
 
-function sincronizarListaCompras_(payload) {
-  const tokenAlEnviar = ++diarioLoadToken_;
-  const body = Object.assign({ usuario: appState.activeUser || 'Brian' }, payload || {});
-  callBackendBackground('guardarListaCompras', body)
-    .then(res => {
-      if (
-        res &&
-        Array.isArray(res.listaCompras) &&
-        tokenAlEnviar === diarioLoadToken_ &&
-        pendingSyncCount === 0 &&
-        getPendingSyncQueue_().length === 0
-      ) {
-        appState.listaCompras = normalizarListaCompras_(res.listaCompras);
-        guardarCacheDiarioLocal_();
-        actualizarBadgeListaCompras_();
-        const modal = document.getElementById('shopping-modal');
-        if (modal && modal.classList.contains('active')) renderShoppingList_();
+const SHOPPING_DRAFT_KEY = 'shopping_draft_batch';
+
+function loadShoppingDraft_() {
+  try {
+    const raw = localStorage.getItem(SHOPPING_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.ops)) return null;
+    return {
+      usuario: normalizarUsuarioLocal_(parsed.usuario, appState.activeUser || 'Brian'),
+      initialDoneById: (parsed.initialDoneById && typeof parsed.initialDoneById === 'object') ? parsed.initialDoneById : {},
+      ops: parsed.ops
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveShoppingDraft_(draft) {
+  try {
+    if (!draft || !Array.isArray(draft.ops) || !draft.ops.length) {
+      localStorage.removeItem(SHOPPING_DRAFT_KEY);
+      return;
+    }
+    localStorage.setItem(SHOPPING_DRAFT_KEY, JSON.stringify({
+      usuario: normalizarUsuarioLocal_(draft.usuario, appState.activeUser || 'Brian'),
+      initialDoneById: draft.initialDoneById || {},
+      ops: draft.ops
+    }));
+  } catch (e) {}
+}
+
+function clearShoppingDraft_() {
+  try {
+    localStorage.removeItem(SHOPPING_DRAFT_KEY);
+  } catch (e) {}
+}
+
+function hasPendingShoppingBatch_() {
+  const draft = loadShoppingDraft_();
+  return !!(draft && draft.ops.length > 0);
+}
+
+function hasQueuedShoppingSync_() {
+  return getPendingSyncQueue_().some(it => it && it.action === 'guardarListaCompras');
+}
+
+function ensureShoppingDraft_() {
+  const existing = loadShoppingDraft_();
+  if (existing) {
+    existing.usuario = normalizarUsuarioLocal_(appState.activeUser, existing.usuario || 'Brian');
+    return existing;
+  }
+  return {
+    usuario: appState.activeUser || 'Brian',
+    initialDoneById: {},
+    ops: []
+  };
+}
+
+function generarIdShoppingBatch_() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return 'shpb_' + crypto.randomUUID();
+  }
+  return 'shpb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function compileShoppingBatchPayload_(draft) {
+  if (!draft || !Array.isArray(draft.ops) || !draft.ops.length) return null;
+  return {
+    op: 'batch',
+    batchId: generarIdShoppingBatch_(),
+    usuario: normalizarUsuarioLocal_(draft.usuario, appState.activeUser || 'Brian'),
+    ops: draft.ops.slice(0, 50)
+  };
+}
+
+function enqueuePendingShoppingDraftForRecovery_() {
+  const draft = loadShoppingDraft_();
+  if (!draft || !draft.ops.length) {
+    clearShoppingDraft_();
+    return false;
+  }
+  const batchPayload = compileShoppingBatchPayload_(draft);
+  clearShoppingDraft_();
+  if (!batchPayload) return false;
+  enqueuePendingSync_('guardarListaCompras', batchPayload);
+  return true;
+}
+
+function aplicarListaServidorSiLimpia_(res) {
+  if (
+    res &&
+    Array.isArray(res.listaCompras) &&
+    !hasPendingShoppingBatch_() &&
+    !hasQueuedShoppingSync_()
+  ) {
+    appState.listaCompras = normalizarListaCompras_(res.listaCompras);
+    guardarCacheDiarioLocal_();
+    actualizarBadgeListaCompras_();
+    const modal = document.getElementById('shopping-modal');
+    if (modal && modal.classList.contains('active')) renderShoppingList_();
+  }
+}
+
+function flushShoppingBatch_(_trigger, opts) {
+  const draft = loadShoppingDraft_();
+  if (!draft || !draft.ops.length) {
+    clearShoppingDraft_();
+    return Promise.resolve(null);
+  }
+  const batchPayload = compileShoppingBatchPayload_(draft);
+  clearShoppingDraft_();
+  if (!batchPayload) return Promise.resolve(null);
+
+  const useKeepalive = !!(opts && opts.useKeepalive);
+  if (useKeepalive) {
+    const accessKey = getStoredAccessKey_();
+    const queueBefore = getPendingSyncQueue_().length;
+    const syncId = enqueuePendingSync_('guardarListaCompras', batchPayload);
+    const bodyStr = accessKey
+      ? JSON.stringify({ action: 'guardarListaCompras', payload: batchPayload, accessKey: accessKey })
+      : '';
+    if (
+      accessKey &&
+      !authPaused_ &&
+      (typeof navigator === 'undefined' || navigator.onLine !== false) &&
+      queueBefore === 0 &&
+      pendingSyncCount === 0 &&
+      !isProcessingSyncQueue_ &&
+      bodyStr.length > 0 &&
+      bodyStr.length <= 50000 &&
+      typeof fetch === 'function'
+    ) {
+      try {
+        return fetch(BACKEND_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: bodyStr,
+          keepalive: true
+        })
+          .then(res => (res && res.ok ? res.json() : null))
+          .then(json => {
+            if (json && json.ok) {
+              savePendingSyncQueue_(getPendingSyncQueue_().filter(x => x.id !== syncId));
+              if (json.data) aplicarListaServidorSiLimpia_(json.data);
+              return json.data || null;
+            }
+            return null;
+          })
+          .catch(() => null);
+      } catch (e) {
+        return Promise.resolve(null);
       }
+    }
+    return Promise.resolve(null);
+  }
+
+  ++diarioLoadToken_;
+  return callBackendBackground('guardarListaCompras', batchPayload)
+    .then(res => {
+      if (res) aplicarListaServidorSiLimpia_(res);
+      return res;
     })
-    .catch(() => {});
+    .catch(err => {
+      console.error('Error sincronizando lote de lista de compras:', err);
+      return null;
+    });
 }
 
 function openShoppingModal() {
@@ -3465,7 +3720,6 @@ function openShoppingModal() {
   pushOverlayStack_('shopping-modal');
   pushModalHistory_('shopping-modal');
   updateFloatingCircleButtonsPosition();
-  syncPullToRefreshGuard_();
 }
 
 function closeShoppingModal() {
@@ -3476,12 +3730,20 @@ function closeShoppingModal() {
   if (modal) modal.classList.remove('active');
   updateFloatingCircleButtonsPosition();
   resetAppScrollToTop_();
-  syncPullToRefreshGuard_();
+  if (hasPendingShoppingBatch_()) {
+    flushShoppingBatch_('modal_close');
+  }
+  maybeApplyPendingSwReload_();
 }
 
 function agregarItemListaCompras() {
   const input = document.getElementById('shopping-item-input');
-  const texto = String(input ? input.value : '').trim().slice(0, 120);
+  const texto = String(input ? input.value : '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+    .slice(0, 120)
+    .replace(/^[\s=+\-@]+/, '')
+    .trim();
   if (!texto) {
     if (input) input.focus();
     showAppToast('Escribí un producto o pendiente primero', true);
@@ -3503,7 +3765,11 @@ function agregarItemListaCompras() {
   }
   guardarCacheDiarioLocal_();
   renderShoppingList_();
-  sincronizarListaCompras_({ op: 'add', item: nuevo, items: appState.listaCompras });
+
+  const draft = ensureShoppingDraft_();
+  draft.ops.push({ op: 'add', item: nuevo });
+  saveShoppingDraft_(draft);
+  if (draft.ops.length >= 45) flushShoppingBatch_('batch_cap');
 }
 
 function toggleItemListaCompras(id) {
@@ -3511,28 +3777,120 @@ function toggleItemListaCompras(id) {
   const item = (appState.listaCompras || []).find(it => String(it.id) === targetId);
   if (!item) return;
 
-  item.done = !item.done;
+  const prevDone = !!item.done;
+  item.done = !prevDone;
   guardarCacheDiarioLocal_();
   renderShoppingList_();
-  sincronizarListaCompras_({ op: 'toggle', id: targetId, done: item.done, items: appState.listaCompras });
+
+  const draft = ensureShoppingDraft_();
+  let lastClearIdx = -1;
+  for (let i = draft.ops.length - 1; i >= 0; i--) {
+    if (draft.ops[i].op === 'clearDone') {
+      lastClearIdx = i;
+      break;
+    }
+  }
+  const addIdx = draft.ops.findIndex(o => o.op === 'add' && o.item && String(o.item.id) === targetId);
+  if (addIdx !== -1 && addIdx > lastClearIdx) {
+    draft.ops[addIdx].item.done = item.done;
+  } else {
+    if (!Object.prototype.hasOwnProperty.call(draft.initialDoneById, targetId)) {
+      draft.initialDoneById[targetId] = prevDone;
+    }
+    let existingToggleIdx = -1;
+    for (let i = draft.ops.length - 1; i > lastClearIdx; i--) {
+      if (draft.ops[i].op === 'toggle' && String(draft.ops[i].id) === targetId) {
+        existingToggleIdx = i;
+        break;
+      }
+    }
+    if (existingToggleIdx !== -1) {
+      if (item.done === !!draft.initialDoneById[targetId]) {
+        draft.ops.splice(existingToggleIdx, 1);
+      } else {
+        draft.ops[existingToggleIdx].done = item.done;
+      }
+    } else {
+      draft.ops.push({ op: 'toggle', id: targetId, done: item.done });
+    }
+  }
+  saveShoppingDraft_(draft);
+  if (draft.ops.length >= 45) flushShoppingBatch_('batch_cap');
 }
 
 function eliminarItemListaCompras(id) {
   const targetId = String(id || '').trim();
+  const prevItem = (appState.listaCompras || []).find(it => String(it.id) === targetId);
+  if (!prevItem) return;
+
   appState.listaCompras = (appState.listaCompras || []).filter(it => String(it.id) !== targetId);
   guardarCacheDiarioLocal_();
   renderShoppingList_();
-  sincronizarListaCompras_({ op: 'delete', id: targetId, items: appState.listaCompras });
+
+  const draft = ensureShoppingDraft_();
+  const addIdx = draft.ops.findIndex(o => o.op === 'add' && o.item && String(o.item.id) === targetId);
+  if (addIdx !== -1) {
+    draft.ops = draft.ops.filter(o => {
+      if (o.op === 'add' && o.item && String(o.item.id) === targetId) return false;
+      if ((o.op === 'toggle' || o.op === 'delete') && String(o.id) === targetId) return false;
+      return true;
+    });
+  } else {
+    if (!Object.prototype.hasOwnProperty.call(draft.initialDoneById, targetId)) {
+      draft.initialDoneById[targetId] = !!prevItem.done;
+    }
+    let lastClearIdx = -1;
+    for (let i = draft.ops.length - 1; i >= 0; i--) {
+      if (draft.ops[i].op === 'clearDone') {
+        lastClearIdx = i;
+        break;
+      }
+    }
+    draft.ops = draft.ops.filter((o, idx) => !(idx > lastClearIdx && o.op === 'toggle' && String(o.id) === targetId));
+    draft.ops.push({ op: 'delete', id: targetId });
+  }
+  saveShoppingDraft_(draft);
+  if (draft.ops.length >= 45) flushShoppingBatch_('batch_cap');
 }
 
 function limpiarCompradosListaCompras() {
-  const restantes = (appState.listaCompras || []).filter(it => !it.done);
-  if (restantes.length === (appState.listaCompras || []).length) return;
-  appState.listaCompras = restantes;
+  const clearedItems = (appState.listaCompras || []).filter(it => it.done);
+  if (!clearedItems.length) return;
+
+  const clearedIds = new Set(clearedItems.map(it => String(it.id)));
+  appState.listaCompras = (appState.listaCompras || []).filter(it => !it.done);
   guardarCacheDiarioLocal_();
   renderShoppingList_();
   showAppToast('🧹 Comprados eliminados de la lista');
-  sincronizarListaCompras_({ op: 'clearDone', items: appState.listaCompras });
+
+  const draft = ensureShoppingDraft_();
+  const preExistingIdsCleared = [];
+  clearedItems.forEach(it => {
+    const cid = String(it.id);
+    const addedInSession = draft.ops.some(o => o.op === 'add' && o.item && String(o.item.id) === cid);
+    if (addedInSession) {
+      draft.ops = draft.ops.filter(o => {
+        if (o.op === 'add' && o.item && String(o.item.id) === cid) return false;
+        if (o.op === 'toggle' && String(o.id) === cid) return false;
+        return true;
+      });
+    } else {
+      if (!Object.prototype.hasOwnProperty.call(draft.initialDoneById, cid)) {
+        draft.initialDoneById[cid] = true;
+      }
+      preExistingIdsCleared.push(cid);
+    }
+  });
+
+  if (preExistingIdsCleared.length > 0 && (draft.ops.length === 0 || draft.ops[draft.ops.length - 1].op !== 'clearDone')) {
+    draft.ops.push({ op: 'clearDone' });
+  }
+  if (!draft.ops.length && clearedIds.size > 0) {
+    clearShoppingDraft_();
+  } else {
+    saveShoppingDraft_(draft);
+  }
+  if (draft.ops.length >= 45) flushShoppingBatch_('batch_cap');
 }
 
 if (typeof history !== 'undefined' && 'scrollRestoration' in history) {
@@ -3541,6 +3899,46 @@ if (typeof history !== 'undefined' && 'scrollRestoration' in history) {
 
 let isUiDelegationBound_ = false;
 let isSwRegistered_ = false;
+let swRegistration_ = null;
+let pendingSwReload_ = false;
+let isManualRefreshing_ = false;
+let ptrSuppressClickUntil_ = 0;
+
+function shouldDeferSwReload_() {
+  const keyModal = document.getElementById('access-key-modal');
+  if (keyModal && keyModal.classList.contains('active')) return true;
+  if (getCurrentScreenState() !== 'MICRO_HOME') return true;
+  if (
+    pendingSyncCount > 0 ||
+    isProcessingSyncQueue_ ||
+    getPendingSyncQueue_().length > 0 ||
+    hasPendingShoppingBatch_()
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function executeSwReload_() {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('app_skip_splash_once', '1');
+    }
+  } catch (e) {}
+  try {
+    if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
+      window.location.reload();
+    }
+  } catch (e) {}
+}
+
+function maybeApplyPendingSwReload_() {
+  if (!pendingSwReload_) return false;
+  if (shouldDeferSwReload_()) return false;
+  pendingSwReload_ = false;
+  executeSwReload_();
+  return true;
+}
 
 function dispatchUiAction_(action, arg, triggerEl) {
   const handlers = {
@@ -3580,6 +3978,7 @@ function initUiEventDelegation_() {
   isUiDelegationBound_ = true;
 
   document.addEventListener('click', (e) => {
+    if (Date.now() < ptrSuppressClickUntil_) return;
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
 
@@ -3704,14 +4103,140 @@ function initUiEventDelegation_() {
   }
 }
 
+function isAtTopForPtr_() {
+  const winY = (typeof window !== 'undefined' && typeof window.scrollY === 'number') ? window.scrollY : 0;
+  if (winY > 0) return false;
+  const docEl = typeof document !== 'undefined' ? document.scrollingElement : null;
+  if (docEl && docEl.scrollTop > 0) return false;
+  const appViewport = document.getElementById('app-viewport');
+  if (appViewport && appViewport.scrollTop > 0) return false;
+  const panelList = document.getElementById('micro-panel-list');
+  if (panelList && panelList.scrollTop > 0) return false;
+  return true;
+}
+
+function resetPtrIndicator_() {
+  const ind = document.getElementById('ptr-indicator');
+  if (!ind) return;
+  ind.classList.remove('pulling', 'visible', 'ready', 'refreshing');
+  ind.style.transform = '';
+  const spinner = ind.querySelector ? ind.querySelector('.ptr-spinner') : null;
+  if (spinner && spinner.style) spinner.style.transform = '';
+}
+
+function initCustomPullToRefresh_() {
+  let ptrTracking = false;
+  let ptrEngaged = false;
+  let startX = 0;
+  let startY = 0;
+  let lastDy = 0;
+  const TRIGGER_DY = 72;
+
+  document.addEventListener('touchstart', (e) => {
+    if (!e || !e.touches || e.touches.length !== 1) {
+      ptrTracking = false;
+      return;
+    }
+    if (isManualRefreshing_ || getCurrentScreenState() !== 'MICRO_HOME' || !isAtTopForPtr_()) {
+      ptrTracking = false;
+      return;
+    }
+    const target = e.target;
+    if (target && typeof target.closest === 'function') {
+      if (target.closest('.days-carousel, #tx-days-carousel, #hb-excluded-days-list, input, select, textarea, button.emoji-chip')) {
+        ptrTracking = false;
+        return;
+      }
+    }
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    lastDy = 0;
+    ptrEngaged = false;
+    ptrTracking = true;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!ptrTracking || !e || !e.touches || e.touches.length !== 1) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+
+    if (!ptrEngaged) {
+      if (dy < -6 || (Math.abs(dx) > 10 && Math.abs(dx) >= Math.abs(dy))) {
+        ptrTracking = false;
+        return;
+      }
+      if (dy > 14 && dy > Math.abs(dx) * 1.5 && isAtTopForPtr_() && getCurrentScreenState() === 'MICRO_HOME') {
+        ptrEngaged = true;
+      } else {
+        return;
+      }
+    }
+
+    if (!isAtTopForPtr_() || dy <= 0) {
+      ptrTracking = false;
+      ptrEngaged = false;
+      resetPtrIndicator_();
+      return;
+    }
+
+    lastDy = dy;
+    const ind = document.getElementById('ptr-indicator');
+    if (ind) {
+      const pullPx = Math.min(88, Math.round(dy * 0.45));
+      ind.style.transform = 'translate3d(-50%, ' + (pullPx - 36) + 'px, 0) scale(1)';
+      ind.classList.add('pulling', 'visible');
+      ind.classList.toggle('ready', dy >= TRIGGER_DY);
+      const spinner = ind.querySelector ? ind.querySelector('.ptr-spinner') : null;
+      if (spinner && spinner.style) {
+        spinner.style.transform = 'rotate(' + Math.round(dy * 3) + 'deg)';
+      }
+    }
+  }, { passive: true });
+
+  const finishPull = () => {
+    if (!ptrTracking) return;
+    const wasEngaged = ptrEngaged;
+    const dy = lastDy;
+    ptrTracking = false;
+    ptrEngaged = false;
+    lastDy = 0;
+
+    if (wasEngaged && dy >= TRIGGER_DY && !isManualRefreshing_ && getCurrentScreenState() === 'MICRO_HOME') {
+      ptrSuppressClickUntil_ = Date.now() + 300;
+      const ind = document.getElementById('ptr-indicator');
+      if (ind) {
+        ind.style.transform = '';
+        ind.classList.remove('pulling', 'ready');
+        ind.classList.add('visible', 'refreshing');
+        const spinner = ind.querySelector ? ind.querySelector('.ptr-spinner') : null;
+        if (spinner && spinner.style) spinner.style.transform = '';
+      }
+      manualRefreshDiario_().finally(() => {
+        resetPtrIndicator_();
+      });
+    } else {
+      resetPtrIndicator_();
+    }
+  };
+
+  document.addEventListener('touchend', finishPull, { passive: true });
+  document.addEventListener('touchcancel', () => {
+    ptrTracking = false;
+    ptrEngaged = false;
+    lastDy = 0;
+    resetPtrIndicator_();
+  }, { passive: true });
+}
+
 function initServiceWorkerRegistration_() {
   if (isSwRegistered_) return;
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
   isSwRegistered_ = true;
 
   const registerSw = () => {
-    navigator.serviceWorker.register('./sw.js')
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
       .then(reg => {
+        swRegistration_ = reg;
         console.log('Service Worker registrado con éxito con alcance:', reg.scope);
       })
       .catch(err => {
@@ -3727,22 +4252,28 @@ function initServiceWorkerRegistration_() {
 
   let refreshing = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    const keyModal = document.getElementById('access-key-modal');
-    if (keyModal && keyModal.classList.contains('active')) return;
-    if (!refreshing) {
-      refreshing = true;
-      window.location.reload();
+    if (refreshing) return;
+    if (shouldDeferSwReload_()) {
+      pendingSwReload_ = true;
+      return;
     }
+    refreshing = true;
+    executeSwReload_();
   });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   const splashEl = document.getElementById('app-splash-screen');
+  const skipSplash = document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('skip-splash');
   if (splashEl) {
-    setTimeout(() => {
-      splashEl.classList.add('splash-hidden');
-      setTimeout(() => splashEl.classList.add('hidden'), 380);
-    }, 650);
+    if (skipSplash) {
+      splashEl.classList.add('splash-hidden', 'hidden');
+    } else {
+      setTimeout(() => {
+        splashEl.classList.add('splash-hidden');
+        setTimeout(() => splashEl.classList.add('hidden'), 380);
+      }, 650);
+    }
   }
   resetAppScrollToTop_();
   window.addEventListener('load', resetAppScrollToTop_);
@@ -3753,6 +4284,7 @@ document.addEventListener('DOMContentLoaded', () => {
     navigator.storage.persist().catch(() => {});
   }
   initUiEventDelegation_();
+  initCustomPullToRefresh_();
   initAvatarLongPress_();
   initOutsideCardTapToClose_();
   initHorizontalSwipeGesture_();

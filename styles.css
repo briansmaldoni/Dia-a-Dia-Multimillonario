@@ -37,9 +37,13 @@ button {
   touch-action: manipulation;
 }
 
-html.ptr-blocked,
-html.ptr-blocked body {
-  overscroll-behavior-y: contain;
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
+html.skip-splash #app-splash-screen {
+  display: none !important;
 }
 
 @media (max-width: 639px) {
@@ -731,6 +735,63 @@ html.ptr-blocked body {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+/* ==================== INDICADOR PULL-TO-REFRESH ==================== */
+.ptr-indicator {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 50%;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--color-primary, #536460);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18), 0 1px 4px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(-50%, -56px, 0) scale(0.85);
+  transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.ptr-indicator.pulling {
+  transition: none;
+}
+
+.ptr-indicator.visible {
+  opacity: 1;
+}
+
+.ptr-indicator.ready .ptr-spinner {
+  border-width: 3px;
+}
+
+.ptr-indicator.refreshing {
+  opacity: 1;
+  transform: translate3d(-50%, 6px, 0) scale(1);
+}
+
+.ptr-spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2.5px solid rgba(83, 100, 96, 0.22);
+  border-top-color: var(--color-primary, #536460);
+  transition: transform 0.1s linear;
+}
+
+.ptr-indicator.refreshing .ptr-spinner {
+  animation: ptrSpin 0.75s linear infinite;
+}
+
+@keyframes ptrSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

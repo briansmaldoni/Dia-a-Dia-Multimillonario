@@ -1,4 +1,28 @@
 (function () {
+  var isReload = false;
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('app_skip_splash_once') === '1') {
+      isReload = true;
+      sessionStorage.removeItem('app_skip_splash_once');
+    }
+  } catch (e) {}
+  try {
+    if (!isReload && typeof performance !== 'undefined' && typeof performance.getEntriesByType === 'function') {
+      var navEntries = performance.getEntriesByType('navigation');
+      if (navEntries && navEntries[0] && navEntries[0].type === 'reload') {
+        isReload = true;
+      }
+    }
+  } catch (e) {}
+  try {
+    if (!isReload && typeof performance !== 'undefined' && performance.navigation && performance.navigation.type === 1) {
+      isReload = true;
+    }
+  } catch (e) {}
+  if (isReload && document && document.documentElement && document.documentElement.classList) {
+    document.documentElement.classList.add('skip-splash');
+  }
+
   var ALLOWED_USERS = ['Brian', 'Virginia'];
   var rawUser = null;
   try {

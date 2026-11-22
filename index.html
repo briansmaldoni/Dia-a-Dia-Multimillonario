@@ -44,6 +44,11 @@
     </div>
   </div>
 
+  <!-- Indicador flotante de Pull-to-Refresh (solo se mueve este pill, sin desplazar el viewport) -->
+  <div id="ptr-indicator" class="ptr-indicator" aria-hidden="true">
+    <span class="ptr-spinner"></span>
+  </div>
+
   <!-- Toast de Sincronización en Segundo Plano -->
   <div id="sync-toast" class="sync-toast flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold">
     <span class="sync-spinner"></span>
@@ -540,13 +545,19 @@
       <!-- Contenedor scrollable de ítems -->
       <div id="shopping-list-container" class="flex-1 overflow-y-auto no-scrollbar space-y-2 py-1 min-h-[120px] max-h-[52vh]"></div>
 
-      <!-- Pie con resumen y botón Limpiar tachados -->
+      <!-- Pie con resumen y acciones -->
       <div id="shopping-footer-bar" class="pt-2 border-t border-zinc-100 flex items-center justify-between gap-2 shrink-0">
         <span id="shopping-summary-text" class="text-[11px] font-semibold text-zinc-500">Sin pendientes</span>
-        <button id="btn-clear-shopping-done" type="button" data-action="clear-checked-shopping"
-          class="hidden text-xs font-bold text-rose-600 hover:text-rose-700 px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 transition-colors">
-          Limpiar tachados
-        </button>
+        <div class="flex items-center gap-2">
+          <button id="btn-clear-shopping-done" type="button" data-action="clear-checked-shopping"
+            class="hidden text-xs font-bold text-rose-600 hover:text-rose-700 px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 transition-colors">
+            Limpiar tachados
+          </button>
+          <button id="btn-close-shopping-done" type="button" data-action="close-shopping-modal"
+            class="text-xs font-bold text-white theme-bg-primary px-3.5 py-1.5 rounded-full shadow-sm hover:opacity-90 transition-opacity">
+            Listo
+          </button>
+        </div>
       </div>
     </div>
   </div>

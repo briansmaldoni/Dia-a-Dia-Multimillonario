@@ -1,19 +1,30 @@
-const CACHE_NAME = 'multimillonarios-cache-v50';
+const CACHE_NAME = 'multimillonarios-cache-v51';
+const FONT_CACHE_NAME = 'multimillonarios-fonts-v1';
+const PRECACHE_URLS = [
+  './',
+  './index.html',
+  './app.js',
+  './theme-boot.js',
+  './tailwind.min.css',
+  './styles.css',
+  './manifest.json',
+  './icon-192.png',
+  './icon-512.png'
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE_NAME)
-      .then(c => c.addAll([
-        './',
-        './index.html',
-        './app.js',
-        './theme-boot.js',
-        './tailwind.min.css',
-        './styles.css',
-        './manifest.json',
-        './icon-192.png',
-        './icon-512.png'
-      ]))
+      .then(cache => Promise.all(
+        PRECACHE_URLS.map(url =>
+          fetch(new Request(url, { cache: 'reload' })).then(res => {
+            if (!res || !res.ok) {
+              throw new Error('Error precargando recurso (' + (res ? res.status : 'sin respuesta') + '): ' + url);
+            }
+            return cache.put(url, res);
+          })
+        )
+      ))
       .then(() => self.skipWaiting())
   );
 });
@@ -21,7 +32,11 @@ self.addEventListener('install', e => {
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+      .then(keys => Promise.all(
+        keys
+          .filter(k => k !== CACHE_NAME && k !== FONT_CACHE_NAME)
+          .map(k => caches.delete(k))
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -45,22 +60,46 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  const isSameOrigin = url.origin === self.location.origin;
+  if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
+    e.respondWith(
+      caches.open(FONT_CACHE_NAME).then(cache =>
+        cache.match(e.request).then(cached => {
+          const networkPromise = fetch(e.request)
+            .then(res => {
+              if (res && res.ok) {
+                cache.put(e.request, res.clone()).catch(() => {});
+              }
+              return res;
+            })
+            .catch(() => null);
+          if (cached) return cached;
+          return networkPromise.then(res => res || new Response('', { status: 504, statusText: 'Offline' }));
+        })
+      )
+    );
+    return;
+  }
+
+  if (url.origin !== self.location.origin) return;
 
   e.respondWith(
-    fetch(e.request)
-      .then(res => {
-        if (isSameOrigin && res && res.ok && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(e.request, copy)).catch(() => {});
-        }
-        return res;
+    caches.open(CACHE_NAME).then(cache =>
+      cache.match(e.request).then(cached => {
+        if (cached) return cached;
+        return fetch(e.request)
+          .then(res => {
+            if (res && res.ok && res.type === 'basic') {
+              cache.put(e.request, res.clone()).catch(() => {});
+            }
+            return res;
+          })
+          .catch(() => {
+            if (e.request.mode === 'navigate') {
+              return cache.match('./index.html').then(idx => idx || caches.match('./index.html'));
+            }
+            return cached;
+          });
       })
-      .catch(() => {
-        if (e.request.mode === 'navigate') {
-          return caches.match(e.request).then(r => r || caches.match('./index.html'));
-        }
-        return caches.match(e.request);
-      })
+    )
   );
 });

@@ -670,7 +670,7 @@ function sanitizarDescripcion_(raw, maxLen) {
     .replace(/[\r\n\t]+/g, ' ')
     .trim()
     .slice(0, maxLen)
-    .replace(/^[=+\-@]+/, '')
+    .replace(/^[\s=+\-@]+/, '')
     .trim();
 }
 
@@ -1207,7 +1207,7 @@ function enviarMensaje_(payload) {
 function formatearListaComprasWhatsApp_(cfg) {
   const parsed = parseJsonConfig_(cfg && cfg.listaCompras);
   const lista = Array.isArray(parsed)
-    ? parsed.map(normalizarItemListaCompras_).filter(Boolean)
+    ? parsed.map(it => normalizarItemListaCompras_(it)).filter(Boolean)
     : [];
   const pendientes = lista.filter(it => !it.done);
   const comprados = lista.filter(it => it.done);
@@ -1336,7 +1336,12 @@ function procesarWebhookGreenApi_(body) {
 
 function normalizarItemListaCompras_(it, serverCreatedAt) {
   if (!it || typeof it !== 'object' || Array.isArray(it)) return null;
-  const texto = String(it.texto || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 120).replace(/^[=+\-@]+/, '').trim();
+  const texto = String(it.texto || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+    .slice(0, 120)
+    .replace(/^[\s=+\-@]+/, '')
+    .trim();
   const id = String(it.id || '').trim();
   if (!id || !esIdSeguro_(id) || !texto) return null;
   const rawAutor = String(it.autor || '').trim();
@@ -1353,12 +1358,176 @@ function normalizarItemListaCompras_(it, serverCreatedAt) {
   };
 }
 
+function leerShoppingBatchIds_() {
+  try {
+    const raw = getScriptProp_('SHOPPING_BATCH_IDS');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(x => typeof x === 'string' && x) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function registrarShoppingBatchId_(batchId) {
+  if (!batchId) return;
+  try {
+    const ids = leerShoppingBatchIds_().filter(id => id !== batchId);
+    ids.push(batchId);
+    const trimmed = ids.slice(-30);
+    PropertiesService.getScriptProperties().setProperty('SHOPPING_BATCH_IDS', JSON.stringify(trimmed));
+  } catch (e) {
+    Logger.log('Error guardando SHOPPING_BATCH_IDS: ' + redactarSecretosTexto_(String(e)));
+  }
+}
+
+function resumirNombresListaBatch_(items, maxShow) {
+  const cap = maxShow || 25;
+  const clean = items.slice(0, cap);
+  if (items.length > cap) {
+    return clean.join(', ') + ' … y ' + (items.length - cap) + ' más';
+  }
+  return clean.join(', ');
+}
+
+function formatearResumenBatchListaCompras_(resumen) {
+  const agregados = resumen.added || [];
+  const tachados = resumen.checked || [];
+  const reabiertos = resumen.unchecked || [];
+  const quitados = resumen.deleted || [];
+  const totalNet = agregados.length + tachados.length + reabiertos.length + quitados.length;
+  if (totalNet === 0) return '';
+
+  if (totalNet === 1) {
+    if (agregados.length === 1) return '🛒 Amorcito, agregué a la lista de compras:\n- ' + agregados[0];
+    if (tachados.length === 1) return '✅ Amorcito, taché de la lista de compras:\n- ' + tachados[0];
+    if (reabiertos.length === 1) return '🛒 Amorcito, volví a agregar a la lista de compras:\n- ' + reabiertos[0];
+    if (quitados.length === 1) return '🛒 Amorcito, quité de la lista de compras:\n- ' + quitados[0];
+  }
+
+  const lineas = ['🛒 Amorcito, actualicé la lista de compras:'];
+  if (agregados.length) lineas.push('➕ Agregué: ' + resumirNombresListaBatch_(agregados, 25));
+  if (tachados.length) lineas.push('✅ Taché: ' + resumirNombresListaBatch_(tachados, 25));
+  if (reabiertos.length) lineas.push('🔄 Volví a agregar: ' + resumirNombresListaBatch_(reabiertos, 25));
+  if (quitados.length) lineas.push('🗑️ Quité: ' + resumirNombresListaBatch_(quitados, 25));
+
+  const texto = lineas.join('\n');
+  return texto.length > 3000 ? (texto.slice(0, 2990) + '…') : texto;
+}
+
+function aplicarOperacionesListaComprasBatch_(listaActual, ops, cfg) {
+  const initialMap = Object.create(null);
+  listaActual.forEach(it => {
+    initialMap[it.id] = { texto: it.texto, done: !!it.done };
+  });
+
+  let lista = listaActual.slice();
+  const touchedOrder = [];
+  const touchedSet = Object.create(null);
+  const wasCheckedBeforeClear = Object.create(null);
+  const markTouched = id => {
+    if (!touchedSet[id]) {
+      touchedSet[id] = true;
+      touchedOrder.push(id);
+    }
+  };
+
+  ops.forEach(step => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'Operación inválida dentro del lote');
+    }
+    const stepOp = String(step.op || '').trim();
+    if (stepOp === 'add') {
+      if (!step.item || typeof step.item !== 'object') {
+        throw crearErrorApp_('VALIDATION_ERROR', 'Ítem inválido en lote');
+      }
+      const rawAddId = String(step.item.id || '').trim();
+      if (!esIdSeguro_(rawAddId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
+      const existing = lista.find(x => String(x.id) === rawAddId);
+      const nuevo = normalizarItemListaCompras_(
+        step.item,
+        existing ? existing.creadoEn : new Date().toISOString()
+      );
+      if (!nuevo) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'Texto o ID de ítem inválido');
+      }
+      markTouched(nuevo.id);
+      const idx = lista.findIndex(x => String(x.id) === nuevo.id);
+      if (idx >= 0) {
+        lista[idx] = nuevo;
+      } else {
+        lista.unshift(nuevo);
+      }
+    } else if (stepOp === 'toggle') {
+      const targetId = String(step.id || '').trim();
+      if (!esIdSeguro_(targetId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
+      const idx = lista.findIndex(x => String(x.id) === targetId);
+      if (idx >= 0) {
+        markTouched(targetId);
+        const estabaHecho = !!lista[idx].done;
+        const nuevoHecho = step.done !== undefined ? !!step.done : !estabaHecho;
+        lista[idx].done = nuevoHecho;
+      }
+    } else if (stepOp === 'delete') {
+      const targetId = String(step.id || '').trim();
+      if (!esIdSeguro_(targetId)) {
+        throw crearErrorApp_('VALIDATION_ERROR', 'ID de ítem inválido');
+      }
+      const idx = lista.findIndex(x => String(x.id) === targetId);
+      if (idx >= 0) {
+        markTouched(targetId);
+        lista.splice(idx, 1);
+      }
+    } else if (stepOp === 'clearDone') {
+      lista.forEach(it => {
+        if (it.done && initialMap[it.id] && !initialMap[it.id].done) {
+          wasCheckedBeforeClear[it.id] = true;
+          markTouched(it.id);
+        }
+      });
+      lista = lista.filter(x => !x.done);
+    } else {
+      throw crearErrorApp_('VALIDATION_ERROR', 'Sub-operación de lote no permitida');
+    }
+  });
+
+  const finalMap = Object.create(null);
+  lista.forEach(it => {
+    finalMap[it.id] = { texto: it.texto, done: !!it.done };
+  });
+
+  const resumen = { added: [], checked: [], unchecked: [], deleted: [] };
+  touchedOrder.forEach(id => {
+    const init = initialMap[id] || null;
+    const fin = finalMap[id] || null;
+    if (!init) {
+      if (fin && !fin.done) resumen.added.push(fin.texto);
+    } else if (!init.done) {
+      if (fin) {
+        if (fin.done) resumen.checked.push(fin.texto);
+      } else if (wasCheckedBeforeClear[id]) {
+        resumen.checked.push(init.texto);
+      } else {
+        resumen.deleted.push(init.texto);
+      }
+    } else {
+      if (fin && !fin.done) resumen.unchecked.push(fin.texto);
+    }
+  });
+
+  return { lista: lista, resumen: resumen, cfg: cfg };
+}
+
 function guardarListaCompras_(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw crearErrorApp_('VALIDATION_ERROR', 'Datos de lista de compras inválidos');
   }
   const op = String(payload.op || '').trim();
-  if (op !== 'add' && op !== 'toggle' && op !== 'delete' && op !== 'clearDone') {
+  if (op !== 'batch' && op !== 'add' && op !== 'toggle' && op !== 'delete' && op !== 'clearDone') {
     throw crearErrorApp_('VALIDATION_ERROR', 'Operación de lista de compras no permitida');
   }
 
@@ -1366,6 +1535,48 @@ function guardarListaCompras_(payload) {
   let waMensaje = '';
   let waUsuario = 'Brian';
   let cfgSnapshot = null;
+
+  if (op === 'batch') {
+    const batchId = String(payload.batchId || '').trim();
+    if (!esIdSeguro_(batchId)) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'batchId inválido');
+    }
+    if (!Array.isArray(payload.ops) || !payload.ops.length || payload.ops.length > 50) {
+      throw crearErrorApp_('VALIDATION_ERROR', 'El lote debe tener entre 1 y 50 operaciones');
+    }
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      invalidarCacheSheet_('Config');
+      const cfg = leerConfig_(true);
+      cfgSnapshot = cfg;
+      const parsed = parseJsonConfig_(cfg.listaCompras);
+      lista = Array.isArray(parsed)
+        ? parsed.slice(0, 150).map(it => normalizarItemListaCompras_(it)).filter(Boolean)
+        : [];
+
+      if (leerShoppingBatchIds_().indexOf(batchId) !== -1) {
+        return { ok: true, deduplicated: true, listaCompras: lista, whatsapp: null };
+      }
+
+      waUsuario = normalizarUsuarioPermitido_(payload.usuario, cfg.usuarioDefault || 'Brian');
+      const aplicado = aplicarOperacionesListaComprasBatch_(lista, payload.ops, cfg);
+      lista = aplicado.lista;
+      if (lista.length > 150) lista = lista.slice(0, 150);
+      escribirConfigSinLock_({ listaCompras: JSON.stringify(lista) });
+      registrarShoppingBatchId_(batchId);
+      waMensaje = formatearResumenBatchListaCompras_(aplicado.resumen);
+    } finally {
+      lock.releaseLock();
+    }
+
+    let waResult = null;
+    if (waMensaje && cfgSnapshot) {
+      waResult = enviarWhatsAppGreenApi_(cfgSnapshot, waUsuario, waMensaje);
+    }
+    return { ok: true, listaCompras: lista, whatsapp: waResult };
+  }
 
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -1421,8 +1632,6 @@ function guardarListaCompras_(payload) {
             ? ('✅ Amorcito, taché de la lista de compras:\n- ' + lista[idx].texto)
             : ('🛒 Amorcito, volví a agregar a la lista de compras:\n- ' + lista[idx].texto);
         }
-      } else if (Array.isArray(payload.items)) {
-        lista = payload.items.slice(0, 150).map(it => normalizarItemListaCompras_(it, new Date().toISOString())).filter(Boolean);
       }
     } else if (op === 'delete') {
       const targetId = String(payload.id || '').trim();
