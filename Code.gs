@@ -121,7 +121,6 @@ function validarAccesoApi_(body) {
 
 function validarWebhookSecret_(e) {
   const expected = getScriptProp_('WEBHOOK_SECRET');
-  if (!expected) return true;
   if (expected.length < 16) return false;
   const arr = e && e.parameters && e.parameters.wh;
   let cand = '';
@@ -1125,12 +1124,11 @@ function getGreenApiCreds_(cfg, usuario) {
   const rawId = String((cfg && cfg['greenApiId_' + user]) || '').trim();
   const idInstance = /^\d{4,20}$/.test(rawId) ? rawId : '';
   const propToken = getScriptProp_('greenApiToken_' + user);
-  const sheetToken = String((cfg && cfg['greenApiToken_' + user]) || '').trim();
   return {
     usuario: user,
     apiUrl: apiUrl,
     idInstance: idInstance,
-    apiToken: propToken || sheetToken
+    apiToken: propToken
   };
 }
 
