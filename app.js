@@ -55,6 +55,19 @@ let cierreDiaPendiente = null;
 
 let pendingSyncCount = 0;
 let authPaused_ = false;
+let clearPendingArmedUntil_ = 0;
+let clearPendingTimer_ = null;
+let vaciarBolsaArmedUntil_ = 0;
+let vaciarBolsaTimer_ = null;
+
+function isAppFramed_() {
+  try {
+    if (typeof window !== 'undefined' && window.__appFramedBlocked) return true;
+    return typeof window !== 'undefined' && window.self !== window.top;
+  } catch (e) {
+    return true;
+  }
+}
 
 // ============================================================
 // CLAVE DE ACCESO Y CLIENTE DE API (Apps Script)
@@ -94,11 +107,105 @@ function isAuthError_(err) {
 function isRetryableBackendError_(err) {
   if (isAuthError_(err)) return false;
   const code = err && err.code ? String(err.code) : '';
-  if (code === 'LOCK_TIMEOUT') return true;
+  if (code === 'LOCK_TIMEOUT' || code === 'SERVICE_UNAVAILABLE') return true;
   return isNetworkOrTimeoutError_(err);
 }
 
+function setLockedBackgroundInert_(locked) {
+  if (typeof document === 'undefined') return;
+  const ids = ['app-viewport', 'day-change-modal', 'palette-modal', 'message-modal', 'shopping-modal'];
+  const activeEl = document.activeElement;
+  if (locked && activeEl && typeof activeEl.blur === 'function') {
+    const keyModal = document.getElementById('access-key-modal');
+    if (!keyModal || !keyModal.contains(activeEl)) {
+      try { activeEl.blur(); } catch (e) {}
+    }
+  }
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (locked) {
+      el.inert = true;
+      el.setAttribute('inert', '');
+      el.setAttribute('aria-hidden', 'true');
+    } else {
+      el.inert = false;
+      el.removeAttribute('inert');
+      el.removeAttribute('aria-hidden');
+    }
+  });
+}
+
+function purgarCacheLecturaYEstadoMemoria_() {
+  try {
+    localStorage.removeItem('cached_diario_state');
+  } catch (e) {}
+  appState.homeBankingTotal = 0;
+  appState.bolsaTotal = 0;
+  appState.diaCobro = null;
+  appState.diasRestantes = [];
+  appState.diasExcluidos = [];
+  appState.movimientos = [];
+  appState.listaCompras = [];
+  appState.lastProcessedDate = null;
+  appState.whatsappConfigured = false;
+  cierreDiaPendiente = null;
+  if (typeof renderMicroView === 'function') renderMicroView();
+  if (typeof renderShoppingList_ === 'function') renderShoppingList_();
+  if (typeof actualizarBadgeListaCompras_ === 'function') actualizarBadgeListaCompras_();
+}
+
+function resetClearPendingLocalBtn_() {
+  clearPendingArmedUntil_ = 0;
+  if (clearPendingTimer_) {
+    clearTimeout(clearPendingTimer_);
+    clearPendingTimer_ = null;
+  }
+  const btn = document.getElementById('btn-clear-pending-local');
+  if (btn) {
+    btn.textContent = 'Borrar cambios pendientes locales';
+    btn.classList.remove('text-[#d31818]', 'font-bold');
+    btn.classList.add('text-zinc-400', 'font-medium');
+  }
+}
+
+function handleClearPendingLocalClick_() {
+  const hasQueued = getPendingSyncQueue_().length > 0;
+  const hasDraft = typeof hasPendingShoppingBatch_ === 'function' && hasPendingShoppingBatch_();
+  let hasCached = false;
+  try { hasCached = Boolean(localStorage.getItem('cached_diario_state')); } catch (e) {}
+
+  if (!hasQueued && !hasDraft && !hasCached) {
+    resetClearPendingLocalBtn_();
+    showAppToast('No hay cambios pendientes locales en este teléfono');
+    return;
+  }
+
+  const now = Date.now();
+  if (now >= clearPendingArmedUntil_) {
+    clearPendingArmedUntil_ = now + 3500;
+    const btn = document.getElementById('btn-clear-pending-local');
+    if (btn) {
+      btn.textContent = '¿Confirmar borrar cambios pendientes?';
+      btn.classList.remove('text-zinc-400', 'font-medium');
+      btn.classList.add('text-[#d31818]', 'font-bold');
+    }
+    if (clearPendingTimer_) clearTimeout(clearPendingTimer_);
+    clearPendingTimer_ = setTimeout(() => {
+      resetClearPendingLocalBtn_();
+    }, 3500);
+    return;
+  }
+
+  savePendingSyncQueue_([]);
+  if (typeof clearShoppingDraft_ === 'function') clearShoppingDraft_();
+  purgarCacheLecturaYEstadoMemoria_();
+  resetClearPendingLocalBtn_();
+  showAppToast('Cambios locales pendientes eliminados');
+}
+
 function openAccessKeyModal_(errorMsg) {
+  if (isAppFramed_()) return;
   const splashEl = document.getElementById('app-splash-screen');
   if (splashEl) {
     splashEl.classList.add('splash-hidden', 'hidden');
@@ -106,6 +213,17 @@ function openAccessKeyModal_(errorMsg) {
   const modal = document.getElementById('access-key-modal');
   const errEl = document.getElementById('access-key-error');
   const inputEl = document.getElementById('access-key-input');
+  if (modal && !modal.classList.contains('active')) {
+    modal.classList.add('active');
+    const hasOtherOpen = document.querySelector('#hb-modal.active, #budget-audit-modal.active, #future-days-modal.active, #message-modal.active, #shopping-modal.active, #palette-modal.active, #day-change-modal.active');
+    if (hasOtherOpen && typeof closeAllActiveModalsWithoutSaving_ === 'function') {
+      closeAllActiveModalsWithoutSaving_();
+    }
+    const dayModal = document.getElementById('day-change-modal');
+    if (dayModal) dayModal.classList.remove('active');
+  }
+  resetClearPendingLocalBtn_();
+  setLockedBackgroundInert_(true);
   if (errEl) {
     if (errorMsg) {
       errEl.textContent = errorMsg;
@@ -115,35 +233,39 @@ function openAccessKeyModal_(errorMsg) {
       errEl.classList.add('hidden');
     }
   }
-  if (modal && !modal.classList.contains('active')) {
-    modal.classList.add('active');
-  }
-  if (inputEl && typeof inputEl.focus === 'function') {
+  if (inputEl && typeof inputEl.focus === 'function' && document.activeElement !== inputEl) {
     setTimeout(() => {
-      try { inputEl.focus(); } catch (e) {}
+      try {
+        if (modal && modal.classList.contains('active')) inputEl.focus();
+      } catch (e) {}
     }, 60);
   }
 }
 
-function closeAccessKeyModal_() {
+function closeAccessKeyModal_(skipSwReload) {
   const modal = document.getElementById('access-key-modal');
   const errEl = document.getElementById('access-key-error');
   const inputEl = document.getElementById('access-key-input');
+  resetClearPendingLocalBtn_();
   if (errEl) {
     errEl.textContent = '';
     errEl.classList.add('hidden');
   }
   if (inputEl) inputEl.value = '';
   if (modal) modal.classList.remove('active');
+  setLockedBackgroundInert_(false);
   resetAppScrollToTop_();
-  maybeApplyPendingSwReload_();
+  if (!skipSwReload) {
+    maybeApplyPendingSwReload_();
+  }
 }
 
 function handleAuthFailure_(err) {
   authPaused_ = true;
   const code = err && err.code ? String(err.code) : 'UNAUTHORIZED';
-  if (code === 'UNAUTHORIZED' && getStoredAccessKey_()) {
-    setStoredAccessKey_('');
+  if (code === 'UNAUTHORIZED') {
+    if (getStoredAccessKey_()) setStoredAccessKey_('');
+    purgarCacheLecturaYEstadoMemoria_();
   }
   const msg = code === 'AUTH_NOT_CONFIGURED'
     ? 'Falta configurar APP_ACCESS_KEY en Google Apps Script (ejecutá generarClaveAcceso).'
@@ -152,6 +274,7 @@ function handleAuthFailure_(err) {
 }
 
 async function submitAccessKeyForm_() {
+  if (isAppFramed_()) return;
   const inputEl = document.getElementById('access-key-input');
   const errEl = document.getElementById('access-key-error');
   const btnEl = document.getElementById('btn-submit-access-key');
@@ -185,18 +308,25 @@ async function submitAccessKeyForm_() {
 
     setStoredAccessKey_(candidate);
     authPaused_ = false;
-    closeAccessKeyModal_();
+    closeAccessKeyModal_(true);
+    enqueuePendingShoppingDraftForRecovery_();
 
     if (getPendingSyncQueue_().length > 0) {
       await processPendingSyncQueue_();
-      if (getPendingSyncQueue_().length === 0 && !authPaused_) {
-        await recargarEstadoDiario_(false);
-        try { await chequearCierreDia_(); } catch (e) {}
+      if (!authPaused_) {
+        if (getPendingSyncQueue_().length === 0) {
+          await recargarEstadoDiario_(false);
+          try { await chequearCierreDia_(); } catch (e) {}
+        } else if (!localStorage.getItem('cached_diario_state')) {
+          aplicarEstadoDiario_(json.data);
+          try { await chequearCierreDia_(); } catch (e) {}
+        }
       }
     } else {
       aplicarEstadoDiario_(json.data);
       try { await chequearCierreDia_(); } catch (e) {}
     }
+    maybeApplyPendingSwReload_();
     showAppToast('Acceso desbloqueado');
   } catch (err) {
     const code = err && err.code ? String(err.code) : '';
@@ -241,6 +371,9 @@ async function fetchWithRetry(url, options, maxRetries = 3, timeoutMs = 35000) {
 }
 
 async function callBackend(action, payload, opts) {
+  if (isAppFramed_()) {
+    throw createApiError_({ ok: false, code: 'FORBIDDEN_FRAME', error: 'Ejecución embebida bloqueada' });
+  }
   const accessKey = getStoredAccessKey_();
   if (!accessKey) {
     const authErr = createApiError_({ ok: false, code: 'UNAUTHORIZED', error: 'Ingresá tu clave de acceso para continuar.' });
@@ -259,7 +392,7 @@ async function callBackend(action, payload, opts) {
   const json = await res.json();
   if (!json.ok) {
     const apiErr = createApiError_(json, 'Error en ' + action);
-    if (isAuthError_(apiErr)) {
+    if (isAuthError_(apiErr) && accessKey === getStoredAccessKey_()) {
       handleAuthFailure_(apiErr);
     }
     throw apiErr;
@@ -343,7 +476,12 @@ async function processPendingSyncQueue_() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (!getPendingSyncQueue_().length) return;
   if (authPaused_ || !getStoredAccessKey_()) {
-    if (!getStoredAccessKey_()) openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar los cambios pendientes.');
+    if (!getStoredAccessKey_()) {
+      const keyModal = document.getElementById('access-key-modal');
+      if (!keyModal || !keyModal.classList.contains('active')) {
+        openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar los cambios pendientes.');
+      }
+    }
     return;
   }
 
@@ -398,10 +536,15 @@ async function processPendingSyncQueue_() {
   }
 }
 
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && !isAppFramed_()) {
   window.addEventListener('online', () => {
     console.log('Conexión reestablecida. Procesando cola de sincronización pendiente...');
-    processPendingSyncQueue_();
+    if (authPaused_ || !getStoredAccessKey_()) return;
+    if (getPendingSyncQueue_().length > 0) {
+      processPendingSyncQueue_();
+    } else {
+      solicitarRecargaSuave_();
+    }
   });
 }
 
@@ -419,7 +562,10 @@ async function callBackendBackground(action, payload) {
   ) {
     enqueuePendingSync_(action, payload);
     if (missingKey || authPaused_) {
-      openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar tus movimientos guardados.');
+      const keyModal = document.getElementById('access-key-modal');
+      if (!keyModal || !keyModal.classList.contains('active')) {
+        openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar tus movimientos guardados.');
+      }
     } else if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       showAppToast('Sin conexión: acción guardada para sincronizar al volver en línea');
     } else if (pendingSyncCount === 0 && !isProcessingSyncQueue_) {
@@ -439,7 +585,7 @@ async function callBackendBackground(action, payload) {
     if (isAuthError_(err)) {
       failedRetryable = true;
       enqueuePendingSync_(action, payload);
-      handleAuthFailure_(err);
+      if (!authPaused_) handleAuthFailure_(err);
       return null;
     }
     if (isRetryableBackendError_(err)) {
@@ -1132,6 +1278,7 @@ function initAvatarLongPress_() {
     };
 
     btn.addEventListener('pointerdown', e => {
+      if (authPaused_ || !getStoredAccessKey_()) return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       longPressTriggered = false;
       startX = e.clientX;
@@ -1163,6 +1310,10 @@ function initAvatarLongPress_() {
     });
 
     btn.addEventListener('click', e => {
+      if (authPaused_ || !getStoredAccessKey_()) {
+        e.preventDefault();
+        return;
+      }
       if (longPressTriggered) {
         longPressTriggered = false;
         e.preventDefault();
@@ -1469,6 +1620,7 @@ function cerrarSubvistasTarjetaExcepto_(keepId) {
   ['hb-modal', 'budget-audit-modal', 'future-days-modal'].forEach(id => {
     if (id === keepId) return;
     if (id === 'hb-modal') {
+      resetVaciarBolsaConfirm_();
       hbExcludedDirty_ = false;
       setMoneyValue('hb-update-amount', '');
       setMoneyValue('hb-bolsa-input', '');
@@ -1496,6 +1648,7 @@ function toggleHbModal(show) {
     pushModalHistory_('hb-modal');
     resetAppScrollToTop_();
   } else {
+    resetVaciarBolsaConfirm_();
     hbExcludedDirty_ = false;
     setMoneyValue('hb-update-amount', '');
     setMoneyValue('hb-bolsa-input', '');
@@ -1617,7 +1770,22 @@ function refrescarVistaHbModalSiAbierto_() {
   actualizarResumenHbModal_();
 }
 
+function resetVaciarBolsaConfirm_() {
+  vaciarBolsaArmedUntil_ = 0;
+  if (vaciarBolsaTimer_) {
+    clearTimeout(vaciarBolsaTimer_);
+    vaciarBolsaTimer_ = null;
+  }
+  const btn = document.getElementById('btn-vaciar-bolsa');
+  if (btn) {
+    btn.textContent = 'Vaciar ahorros';
+    btn.classList.remove('bg-[#d31818]', 'hover:bg-[#b91c1c]');
+    btn.classList.add('bg-white/15', 'hover:bg-white/25');
+  }
+}
+
 function prepararHbModal_() {
+  resetVaciarBolsaConfirm_();
   hbExcludedDirty_ = false;
   hbDraftDiasExcluidos_ = getDiasExcluidosEnPeriodo_().slice();
   setMoneyValue('hb-update-amount', '');
@@ -1689,19 +1857,32 @@ async function saveHbAmount() {
 }
 
 async function handleVaciarBolsaAhorro() {
-  const updatesLocal = { bolsaTotal: 0 };
-  const payloadBackend = { bolsaTotal: 0 };
-  if (tieneEdicionMonto_('hb-update-amount')) {
-    const valHb = getMoneyValue('hb-update-amount');
-    updatesLocal.homeBankingTotal = valHb;
-    payloadBackend.homeBankingTotal = valHb;
+  if ((Number(appState.bolsaTotal) || 0) <= 0) {
+    resetVaciarBolsaConfirm_();
+    showAppToast('Tus ahorros ya están en $ 0');
+    return;
   }
-  if (hbExcludedDirty_) {
-    const excl = hbDraftDiasExcluidos_.slice();
-    updatesLocal.diasExcluidos = excl;
-    payloadBackend.diasExcluidos = excl;
+  const now = Date.now();
+  if (now >= vaciarBolsaArmedUntil_) {
+    vaciarBolsaArmedUntil_ = now + 3500;
+    const btn = document.getElementById('btn-vaciar-bolsa');
+    if (btn) {
+      btn.textContent = '¿Confirmar vaciar?';
+      btn.classList.remove('bg-white/15', 'hover:bg-white/25');
+      btn.classList.add('bg-[#d31818]', 'hover:bg-[#b91c1c]');
+    }
+    if (vaciarBolsaTimer_) clearTimeout(vaciarBolsaTimer_);
+    vaciarBolsaTimer_ = setTimeout(() => {
+      resetVaciarBolsaConfirm_();
+    }, 3500);
+    return;
   }
-  aplicarYGuardarHbYBolsa_(updatesLocal, payloadBackend);
+  resetVaciarBolsaConfirm_();
+  setMoneyValue('hb-update-amount', '');
+  setMoneyValue('hb-bolsa-input', '');
+  hbExcludedDirty_ = false;
+  hbDraftDiasExcluidos_ = getDiasExcluidosEnPeriodo_().slice();
+  aplicarYGuardarHbYBolsa_({ bolsaTotal: 0 }, { bolsaTotal: 0 });
   showAppToast('Ahorros pasados al presupuesto');
 }
 
@@ -2970,24 +3151,28 @@ function normalizarMovimientosLocal_(raw) {
 }
 
 function cargarCacheDiarioLocal_() {
-  const cached = localStorage.getItem('cached_diario_state');
-  if (!cached) return false;
-  const parsed = JSON.parse(cached);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-  if (parsed.homeBankingTotal !== undefined && Number.isFinite(Number(parsed.homeBankingTotal))) {
-    appState.homeBankingTotal = Number(parsed.homeBankingTotal);
+  try {
+    const cached = localStorage.getItem('cached_diario_state');
+    if (!cached) return false;
+    const parsed = JSON.parse(cached);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    if (parsed.homeBankingTotal !== undefined && Number.isFinite(Number(parsed.homeBankingTotal))) {
+      appState.homeBankingTotal = Number(parsed.homeBankingTotal);
+    }
+    if (parsed.bolsaTotal !== undefined && Number.isFinite(Number(parsed.bolsaTotal))) {
+      appState.bolsaTotal = Number(parsed.bolsaTotal);
+    }
+    if (parsed.diaCobro !== undefined) appState.diaCobro = parsed.diaCobro;
+    if (Array.isArray(parsed.diasRestantes)) appState.diasRestantes = normalizarDiasRestantesLocal_(parsed.diasRestantes);
+    if (Array.isArray(parsed.diasExcluidos)) appState.diasExcluidos = normalizarDiasExcluidosLocal_(parsed.diasExcluidos);
+    if (Array.isArray(parsed.movimientos)) appState.movimientos = normalizarMovimientosLocal_(parsed.movimientos);
+    if (Array.isArray(parsed.listaCompras)) appState.listaCompras = normalizarListaCompras_(parsed.listaCompras);
+    if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = normalizarFechaConfig_(parsed.lastProcessedDate, hoyISO_());
+    if (parsed.whatsappConfigured !== undefined) appState.whatsappConfigured = !!parsed.whatsappConfigured;
+    return true;
+  } catch (e) {
+    return false;
   }
-  if (parsed.bolsaTotal !== undefined && Number.isFinite(Number(parsed.bolsaTotal))) {
-    appState.bolsaTotal = Number(parsed.bolsaTotal);
-  }
-  if (parsed.diaCobro !== undefined) appState.diaCobro = parsed.diaCobro;
-  if (Array.isArray(parsed.diasRestantes)) appState.diasRestantes = normalizarDiasRestantesLocal_(parsed.diasRestantes);
-  if (Array.isArray(parsed.diasExcluidos)) appState.diasExcluidos = normalizarDiasExcluidosLocal_(parsed.diasExcluidos);
-  if (Array.isArray(parsed.movimientos)) appState.movimientos = normalizarMovimientosLocal_(parsed.movimientos);
-  if (Array.isArray(parsed.listaCompras)) appState.listaCompras = normalizarListaCompras_(parsed.listaCompras);
-  if (parsed.lastProcessedDate !== undefined) appState.lastProcessedDate = normalizarFechaConfig_(parsed.lastProcessedDate, hoyISO_());
-  if (parsed.whatsappConfigured !== undefined) appState.whatsappConfigured = !!parsed.whatsappConfigured;
-  return true;
 }
 
 function aplicarEstadoDiario_(data) {
@@ -3092,6 +3277,14 @@ async function manualRefreshDiario_() {
 }
 
 async function bootstrapEstado_() {
+  if (isAppFramed_()) return;
+  if (!getStoredAccessKey_()) {
+    authPaused_ = true;
+    purgarCacheLecturaYEstadoMemoria_();
+    openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar.');
+    return;
+  }
+
   const miToken = ++diarioLoadToken_;
   try {
     if (miToken === diarioLoadToken_ && cargarCacheDiarioLocal_()) {
@@ -3101,12 +3294,6 @@ async function bootstrapEstado_() {
   } catch (e) {}
 
   enqueuePendingShoppingDraftForRecovery_();
-
-  if (!getStoredAccessKey_()) {
-    authPaused_ = true;
-    openAccessKeyModal_('Ingresá tu clave de acceso para sincronizar.');
-    return;
-  }
 
   if (getPendingSyncQueue_().length > 0) {
     await processPendingSyncQueue_();
@@ -3134,7 +3321,13 @@ window.diagnosticarBackend = async function() {
   console.log('--- DIAGNÓSTICO DE CONEXIÓN CON GOOGLE APPS SCRIPT ---');
   try {
     const diario = await callBackendConSync('getEstadoDiario', {});
-    console.log('✅ getEstadoDiario OK:', diario);
+    const resumen = {
+      ok: true,
+      movimientos: Array.isArray(diario && diario.movimientos) ? diario.movimientos.length : 0,
+      listaCompras: Array.isArray(diario && diario.listaCompras) ? diario.listaCompras.length : 0,
+      whatsappConfigured: Boolean(diario && diario.whatsappConfigured)
+    };
+    console.log('✅ getEstadoDiario OK:', resumen);
     showAppToast('Conexión con la base de datos OK ✅');
     return { ok: true, diario };
   } catch (err) {
@@ -3148,25 +3341,19 @@ window.diagnosticarBackend = async function() {
 // FUNCIÓN DE RESPALDO Y EXPORTACIÓN DE ESTADO
 // ============================================================
 window.exportarRespaldoEstado = function() {
+  if (authPaused_ || !getStoredAccessKey_()) {
+    showAppToast('Desbloqueá la aplicación antes de exportar un respaldo', true);
+    return null;
+  }
   const respaldo = {
     version: 'multimillonarios-diario',
     exportDate: new Date().toISOString(),
     appState: appState,
-    cachedDiarioState: null,
     configLocal: {
       activeUser: appState.activeUser
     },
     localStorage: {}
   };
-
-  try {
-    const cachedDiario = localStorage.getItem('cached_diario_state');
-    if (cachedDiario) {
-      respaldo.cachedDiarioState = JSON.parse(cachedDiario);
-    }
-  } catch (e) {
-    respaldo.cachedDiarioState = localStorage.getItem('cached_diario_state');
-  }
 
   const BACKUP_STORAGE_ALLOWLIST = [
     'userActive',
@@ -3175,7 +3362,8 @@ window.exportarRespaldoEstado = function() {
     'userPaletteVars_Brian',
     'userPaletteVars_Virginia',
     'cached_diario_state',
-    'pending_sync_queue'
+    'pending_sync_queue',
+    'shopping_draft_batch'
   ];
 
   try {
@@ -3395,6 +3583,7 @@ async function enviarListaComprasWhatsApp() {
 }
 
 function solicitarRecargaSuave_() {
+  if (isAppFramed_() || authPaused_ || !getStoredAccessKey_()) return;
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   if (hasPendingShoppingBatch_()) return;
@@ -3540,6 +3729,18 @@ function renderShoppingList_() {
 
 const SHOPPING_DRAFT_KEY = 'shopping_draft_batch';
 
+function normalizarInitialDoneMap_(rawObj) {
+  const map = Object.create(null);
+  if (rawObj && typeof rawObj === 'object' && !Array.isArray(rawObj)) {
+    Object.keys(rawObj).forEach(k => {
+      if (typeof k === 'string' && k) {
+        map[k] = !!rawObj[k];
+      }
+    });
+  }
+  return map;
+}
+
 function loadShoppingDraft_() {
   try {
     const raw = localStorage.getItem(SHOPPING_DRAFT_KEY);
@@ -3548,7 +3749,7 @@ function loadShoppingDraft_() {
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.ops)) return null;
     return {
       usuario: normalizarUsuarioLocal_(parsed.usuario, appState.activeUser || 'Brian'),
-      initialDoneById: (parsed.initialDoneById && typeof parsed.initialDoneById === 'object') ? parsed.initialDoneById : {},
+      initialDoneById: normalizarInitialDoneMap_(parsed.initialDoneById),
       ops: parsed.ops
     };
   } catch (e) {
@@ -3593,7 +3794,7 @@ function ensureShoppingDraft_() {
   }
   return {
     usuario: appState.activeUser || 'Brian',
-    initialDoneById: {},
+    initialDoneById: Object.create(null),
     ops: []
   };
 }
@@ -3644,6 +3845,9 @@ function aplicarListaServidorSiLimpia_(res) {
 }
 
 function flushShoppingBatch_(_trigger, opts) {
+  if (isAppFramed_() || authPaused_ || !getStoredAccessKey_()) {
+    return Promise.resolve(null);
+  }
   const draft = loadShoppingDraft_();
   if (!draft || !draft.ops.length) {
     clearShoppingDraft_();
@@ -3937,6 +4141,7 @@ function maybeApplyPendingSwReload_() {
 }
 
 function dispatchUiAction_(action, arg, triggerEl) {
+  if (authPaused_ || !getStoredAccessKey_()) return;
   const handlers = {
     'open-shopping-modal': () => openShoppingModal(),
     'open-message-modal': () => openMessageModal(),
@@ -3966,7 +4171,23 @@ function dispatchUiAction_(action, arg, triggerEl) {
     'clear-checked-shopping': () => limpiarCompradosListaCompras(),
     'handle-bag-checkbox': () => handleBagCheckbox(triggerEl)
   };
-  if (handlers[action]) handlers[action]();
+  if (Object.prototype.hasOwnProperty.call(handlers, action)) handlers[action]();
+}
+
+function esEventoPermitidoBloqueado_(target) {
+  return Boolean(target && typeof target.closest === 'function' && target.closest('#access-key-modal'));
+}
+
+function exigirBloqueoUi_(e, target) {
+  if (!authPaused_ && getStoredAccessKey_()) return false;
+  if (esEventoPermitidoBloqueado_(target)) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  const keyModal = document.getElementById('access-key-modal');
+  if (!keyModal || !keyModal.classList.contains('active')) {
+    openAccessKeyModal_('Ingresá tu clave de acceso para continuar.');
+  }
+  return true;
 }
 
 function initUiEventDelegation_() {
@@ -3977,6 +4198,13 @@ function initUiEventDelegation_() {
     if (Date.now() < ptrSuppressClickUntil_) return;
     const target = e.target;
     if (!target || typeof target.closest !== 'function') return;
+
+    if (target.closest('#btn-clear-pending-local')) {
+      handleClearPendingLocalClick_();
+      return;
+    }
+
+    if (exigirBloqueoUi_(e, target)) return;
 
     const backdropEl = target.closest('[data-backdrop-close]');
     if (backdropEl && e.target === backdropEl) {
@@ -4064,6 +4292,7 @@ function initUiEventDelegation_() {
 
   document.addEventListener('change', (e) => {
     const target = e.target;
+    if (exigirBloqueoUi_(e, target)) return;
     if (!target || typeof target.matches !== 'function') return;
     if (target.matches('[data-action="handle-bag-checkbox"]')) {
       handleBagCheckbox(target);
@@ -4072,6 +4301,7 @@ function initUiEventDelegation_() {
 
   document.addEventListener('input', (e) => {
     const target = e.target;
+    if (exigirBloqueoUi_(e, target)) return;
     if (!target || typeof target.matches !== 'function') return;
     if (target.matches('[data-capitalize="true"]')) {
       capitalizeInput(target);
@@ -4081,6 +4311,7 @@ function initUiEventDelegation_() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const target = e.target;
+    if (exigirBloqueoUi_(e, target)) return;
     if (!target || typeof target.closest !== 'function') return;
     const auditTxEl = target.closest('[data-audit-tx-id]');
     if (auditTxEl) {
@@ -4259,6 +4490,12 @@ function initServiceWorkerRegistration_() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  if (isAppFramed_()) {
+    if (document.documentElement && document.documentElement.classList) {
+      document.documentElement.classList.add('framed-blocked');
+    }
+    return;
+  }
   const splashEl = document.getElementById('app-splash-screen');
   const skipSplash = document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('skip-splash');
   if (splashEl) {
@@ -4301,6 +4538,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(updateFloatingCircleButtonsPosition, 120);
     });
     shoppingInput.addEventListener('keydown', e => {
+      if (authPaused_ || !getStoredAccessKey_()) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         agregarItemListaCompras();
@@ -4324,6 +4562,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(updateFloatingCircleButtonsPosition, 120);
     });
     msgInput.addEventListener('keydown', e => {
+      if (authPaused_ || !getStoredAccessKey_()) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         enviarMensajePareja();

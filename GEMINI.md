@@ -16,5 +16,6 @@
   3. Hacer `git add`, `git commit` y `git push origin main` a GitHub.
 
 ## 4. Seguridad y archivos locales
-- Nunca subir credenciales privadas, tokens ni claves secretas (por ejemplo `.clasprc.json`, `.env`, `greenApiToken_*` o `greenApiId_*`) a archivos del repositorio ni a `app.js`/`index.html`. Todas las credenciales de la app van únicamente en la pestaña `Config` del Google Sheet.
+- Nunca subir credenciales privadas, tokens ni claves secretas (por ejemplo `.clasprc.json`, `.env`, `APP_ACCESS_KEY`, `WEBHOOK_SECRET`, `greenApiToken_*` o `greenApiId_*`) a archivos del repositorio ni a `app.js`/`index.html`.
+- Los secretos de servidor (`APP_ACCESS_KEY`, `WEBHOOK_SECRET`, `greenApiToken_Brian`, `greenApiToken_Virginia`) viven **exclusivamente en `ScriptProperties` de Google Apps Script** (gestionados con `generarClaveAcceso`, `generarSecretoWebhook`, `configurarTokenGreenApi` y `migrarSecretosAProperties`). En la pestaña `Config` del Google Sheet van únicamente parámetros operativos no secretos (`whatsappGroupId`, `greenApiId_*`, `greenApiUrl_*`, saldos, `diasExcluidos`, `listaCompras`).
 - Mantener la carpeta local `.agents/` fuera del control de versiones (listada en `.gitignore`).

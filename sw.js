@@ -1,4 +1,4 @@
-const CACHE_NAME = 'multimillonarios-cache-v52';
+const CACHE_NAME = 'multimillonarios-cache-v53';
 const FONT_CACHE_NAME = 'multimillonarios-fonts-v1';
 const PRECACHE_URLS = [
   './',
@@ -34,7 +34,7 @@ self.addEventListener('activate', e => {
     caches.keys()
       .then(keys => Promise.all(
         keys
-          .filter(k => k !== CACHE_NAME && k !== FONT_CACHE_NAME)
+          .filter(k => k.startsWith('multimillonarios-') && k !== CACHE_NAME && k !== FONT_CACHE_NAME)
           .map(k => caches.delete(k))
       ))
       .then(() => self.clients.claim())
@@ -66,13 +66,16 @@ self.addEventListener('fetch', e => {
         cache.match(e.request).then(cached => {
           const networkPromise = fetch(e.request)
             .then(res => {
-              if (res && res.ok) {
-                cache.put(e.request, res.clone()).catch(() => {});
+              if (res && (res.ok || res.type === 'opaque')) {
+                return cache.put(e.request, res.clone()).catch(() => {}).then(() => res);
               }
               return res;
             })
             .catch(() => null);
-          if (cached) return cached;
+          if (cached) {
+            e.waitUntil(networkPromise);
+            return cached;
+          }
           return networkPromise.then(res => res || new Response('', { status: 504, statusText: 'Offline' }));
         })
       )
@@ -95,9 +98,11 @@ self.addEventListener('fetch', e => {
           })
           .catch(() => {
             if (e.request.mode === 'navigate') {
-              return cache.match('./index.html').then(idx => idx || caches.match('./index.html'));
+              return cache.match('./index.html')
+                .then(idx => idx || caches.match('./index.html'))
+                .then(idx => idx || new Response('Sin conexión', { status: 504, statusText: 'Offline' }));
             }
-            return cached;
+            return new Response('', { status: 504, statusText: 'Offline' });
           });
       })
     )

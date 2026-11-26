@@ -32,10 +32,11 @@ const SHEET_SCHEMAS = {
 // ============================================================
 
 const MAX_BODY_CHARS_ = 65536;
+const MAX_SECRET_CHARS_ = 256;
 const MAX_MONEY_VALUE_ = 1e12;
-const ALLOWED_USERS_ = { Brian: 'Brian', Virginia: 'Virginia' };
+const ALLOWED_USERS_ = Object.assign(Object.create(null), { Brian: 'Brian', Virginia: 'Virginia' });
 const GREEN_API_URL_REGEX_ = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+green-?api\.com$/i;
-const ALLOWED_CONFIG_KEYS_ = {
+const ALLOWED_CONFIG_KEYS_ = Object.assign(Object.create(null), {
   homeBankingTotal: true,
   bolsaTotal: true,
   lastProcessedDate: true,
@@ -47,7 +48,7 @@ const ALLOWED_CONFIG_KEYS_ = {
   greenApiUrl_Virginia: true,
   greenApiId_Virginia: true,
   usuarioDefault: true
-};
+});
 
 function crearErrorApp_(code, message) {
   const err = new Error(message || 'Error en la solicitud');
@@ -57,7 +58,11 @@ function crearErrorApp_(code, message) {
 }
 
 function redactarSecretosTexto_(str) {
-  return String(str || '').replace(/\/(sendMessage|getChats)\/[^/\s"']+/gi, '/$1/[REDACTED]');
+  return String(str || '')
+    .replace(/(\/waInstance\d+\/[A-Za-z0-9_-]+\/)[^/\s"'?&]+/gi, '$1[REDACTED]')
+    .replace(/\/(sendMessage|getChats)\/[^/\s"'?&]+/gi, '/$1/[REDACTED]')
+    .replace(/([?&]wh=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/("accessKey"\s*:\s*")[^"]*"/gi, '$1[REDACTED]"');
 }
 
 function constantTimeEquals_(a, b) {
@@ -88,11 +93,19 @@ function generarTokenSeguro_(len = 32) {
 }
 
 function getScriptProp_(key) {
-  try {
-    return String(PropertiesService.getScriptProperties().getProperty(key) || '').trim();
-  } catch (e) {
-    return '';
+  let propsObj = _scriptPropsCache;
+  if (!propsObj) {
+    try {
+      propsObj = PropertiesService.getScriptProperties().getProperties() || {};
+      _scriptPropsCache = propsObj;
+    } catch (e) {
+      Logger.log('Error leyendo ScriptProperties: ' + redactarSecretosTexto_(String(e)));
+      throw crearErrorApp_('SERVICE_UNAVAILABLE', 'Servicio de propiedades temporalmente no disponible');
+    }
   }
+  return Object.prototype.hasOwnProperty.call(propsObj, key)
+    ? String(propsObj[key] || '').trim()
+    : '';
 }
 
 function validarAccesoApi_(body) {
@@ -101,7 +114,7 @@ function validarAccesoApi_(body) {
     throw crearErrorApp_('AUTH_NOT_CONFIGURED', 'Falta activar la clave de acceso en Apps Script (ejecutá generarClaveAcceso)');
   }
   const provided = (body && typeof body.accessKey === 'string') ? body.accessKey.trim() : '';
-  if (!provided || !constantTimeEquals_(provided, expected)) {
+  if (!provided || provided.length > MAX_SECRET_CHARS_ || !constantTimeEquals_(provided, expected)) {
     throw crearErrorApp_('UNAUTHORIZED', 'Clave de acceso inválida o faltante');
   }
 }
@@ -111,16 +124,29 @@ function validarWebhookSecret_(e) {
   if (!expected) return true;
   if (expected.length < 16) return false;
   const arr = e && e.parameters && e.parameters.wh;
+  let cand = '';
   if (Array.isArray(arr)) {
     if (arr.length !== 1) return false;
-    return constantTimeEquals_(String(arr[0] || '').trim(), expected);
+    cand = String(arr[0] || '').trim();
+  } else {
+    const single = e && e.parameter && e.parameter.wh;
+    cand = String(single || '').trim();
   }
-  const single = e && e.parameter && e.parameter.wh;
-  return constantTimeEquals_(String(single || '').trim(), expected);
+  if (!cand || cand.length > MAX_SECRET_CHARS_) return false;
+  return constantTimeEquals_(cand, expected);
 }
 
 function doPost(e) {
   try {
+    const hasWebhookParam = Boolean(e && ((e.parameter && e.parameter.wh !== undefined) || (e.parameters && e.parameters.wh !== undefined)));
+    let webhookAuthorized = false;
+    if (hasWebhookParam) {
+      if (!validarWebhookSecret_(e)) {
+        return ContentService.createTextOutput('UNAUTHORIZED').setMimeType(ContentService.MimeType.TEXT);
+      }
+      webhookAuthorized = true;
+    }
+
     const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
     if (rawBody.length > MAX_BODY_CHARS_) {
       throw crearErrorApp_('PAYLOAD_TOO_LARGE', 'La solicitud supera el tamaño máximo permitido');
@@ -137,9 +163,8 @@ function doPost(e) {
       throw crearErrorApp_('VALIDATION_ERROR', 'Cuerpo JSON inválido');
     }
 
-    const hasWebhookParam = Boolean(e && ((e.parameter && e.parameter.wh !== undefined) || (e.parameters && e.parameters.wh !== undefined)));
     if (body.typeWebhook !== undefined || hasWebhookParam) {
-      if (!validarWebhookSecret_(e)) {
+      if (!webhookAuthorized && !validarWebhookSecret_(e)) {
         return ContentService.createTextOutput('UNAUTHORIZED').setMimeType(ContentService.MimeType.TEXT);
       }
       if (body.typeWebhook) {
@@ -196,6 +221,11 @@ let _sheetsCache = {};
 let _configCache = null;
 let _filasCache = {};
 let _cabecerasVerificadas = {};
+let _scriptPropsCache = null;
+
+function invalidarScriptPropsCache_() {
+  _scriptPropsCache = null;
+}
 
 function getActiveSpreadsheet_() {
   if (!_ssActiva) {
@@ -667,10 +697,11 @@ function sanitizarDescripcion_(raw, maxLen) {
   if (raw === undefined || raw === null) return '';
   if (typeof raw !== 'string') throw crearErrorApp_('VALIDATION_ERROR', 'Descripción inválida');
   return raw
-    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\x00-\x1f\x7f]+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLen)
-    .replace(/^[\s=+\-@]+/, '')
+    .replace(/^[\s=+\-@']+/, '')
     .trim();
 }
 
@@ -821,11 +852,6 @@ function guardarMovimiento_(data) {
       bolsaTotal -= nuevoMonto;
     }
 
-    escribirConfigSinLock_({
-      homeBankingTotal: hbTotal,
-      bolsaTotal: bolsaTotal
-    });
-
     obj = {
       id: id,
       tipo: data.tipo,
@@ -840,6 +866,11 @@ function guardarMovimiento_(data) {
 
     const actualizado = movExistente ? actualizarFilaPorId_('Movimientos', id, obj) : false;
     if (!actualizado) agregarFila_('Movimientos', obj);
+
+    escribirConfigSinLock_({
+      homeBankingTotal: hbTotal,
+      bolsaTotal: bolsaTotal
+    });
 
     if (!data.silencioso) {
       const esEdicion = !!(movExistente || actualizado);
@@ -907,20 +938,22 @@ function eliminarMovimiento_(payload) {
         bolsaTotal += (Number(movExistente.monto) || 0);
       }
 
-      escribirConfigSinLock_({
-        homeBankingTotal: hbTotal,
-        bolsaTotal: bolsaTotal
-      });
-
       borrado = borrarFilaPorId_('Movimientos', id);
-      if (borrado && !silencioso) {
-        const actorUsuario = usuarioPayload || normalizarUsuarioPermitido_(movExistente.usuario, cfg.usuarioDefault || 'Brian');
-        const descLimpia = movExistente.descripcion || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
-        const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
-        const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
-        const dispTxt = disponibleHoyTexto ? ('\n💰 Disponible para hoy: *' + disponibleHoyTexto + '*') : '';
-        const mensajeWa = '🗑️ Amorcito, eliminé este gasto:\n• *' + descLimpia + ':* ' + montoTxt + bolsaTxt + dispTxt;
-        waInfo = { cfg: cfg, actorUsuario: actorUsuario, mensajeWa: mensajeWa };
+      if (borrado) {
+        escribirConfigSinLock_({
+          homeBankingTotal: hbTotal,
+          bolsaTotal: bolsaTotal
+        });
+        if (!silencioso) {
+          const actorUsuario = usuarioPayload || normalizarUsuarioPermitido_(movExistente.usuario, cfg.usuarioDefault || 'Brian');
+          const descBase = sanitizarDescripcion_(String(movExistente.descripcion || ''), 140);
+          const descLimpia = descBase || (movExistente.tipo === 'divisible' ? 'Gasto divisible' : 'Gasto único');
+          const montoTxt = formatearMonedaGS_(movExistente.monto || 0);
+          const bolsaTxt = movExistente.fromBag ? ' (era de ahorros)' : '';
+          const dispTxt = disponibleHoyTexto ? ('\n💰 Disponible para hoy: *' + disponibleHoyTexto + '*') : '';
+          const mensajeWa = '🗑️ Amorcito, eliminé este gasto:\n• *' + descLimpia + ':* ' + montoTxt + bolsaTxt + dispTxt;
+          waInfo = { cfg: cfg, actorUsuario: actorUsuario, mensajeWa: mensajeWa };
+        }
       }
     }
   } finally {
@@ -1252,6 +1285,29 @@ function procesarWebhookGreenApi_(body) {
     return { handled: false, reason: 'ignored_type' };
   }
 
+  const msgData = (body && body.messageData) || {};
+  const rawText = String(
+    (msgData.textMessageData && msgData.textMessageData.textMessage) ||
+    (msgData.extendedTextMessageData && msgData.extendedTextMessageData.text) ||
+    ''
+  ).trim();
+  if (!rawText || rawText.length > 500) return { handled: false, reason: 'empty_text' };
+
+  const cmd = rawText
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+  const WA_STATIC_COMMANDS_ = new Set([
+    'menu', '/menu', '!menu', 'ayuda', '?',
+    'lista', '/lista', '!lista', 'compras', 'lista de compras',
+    '/1', '/2', '/3', '1', '2', '3'
+  ]);
+  if (!WA_STATIC_COMMANDS_.has(cmd)) {
+    return { handled: false, reason: 'not_a_command' };
+  }
+
   const cfg = leerConfig_(true);
   const groupId = String((cfg && cfg.whatsappGroupId) || '').trim();
   const chatId = String((body && body.senderData && body.senderData.chatId) || '').trim();
@@ -1272,32 +1328,22 @@ function procesarWebhookGreenApi_(body) {
   }
 
   const idMsg = String((body && body.idMessage) || '').trim();
+  const dedupInput = (idMsg && idMsg.length <= 128)
+    ? ('id:' + idMsg)
+    : ('fb:' + chatId + '|' + tipo + '|' + String((body && body.timestamp) || '') + '|' + cmd);
   const cache = CacheService.getScriptCache();
-  if (idMsg) {
-    const dedupKey = 'wa_msg_' + hashSha256Hex_(idMsg).slice(0, 40);
-    const lock = LockService.getScriptLock();
-    const gotLock = (typeof lock.tryLock === 'function') ? lock.tryLock(3000) : true;
-    try {
-      if (cache.get(dedupKey)) return { handled: false, reason: 'duplicate' };
-      cache.put(dedupKey, '1', 120);
-    } finally {
-      if (gotLock) lock.releaseLock();
-    }
+  const dedupKey = 'wa_msg_' + hashSha256Hex_(dedupInput).slice(0, 40);
+  const lock = LockService.getScriptLock();
+  const gotLock = (typeof lock.tryLock === 'function') ? lock.tryLock(6000) : true;
+  if (!gotLock) {
+    return { handled: false, reason: 'lock_busy' };
   }
-
-  const msgData = (body && body.messageData) || {};
-  const rawText = String(
-    (msgData.textMessageData && msgData.textMessageData.textMessage) ||
-    (msgData.extendedTextMessageData && msgData.extendedTextMessageData.text) ||
-    ''
-  ).trim();
-  if (!rawText || rawText.length > 500) return { handled: false, reason: 'empty_text' };
-
-  const cmd = rawText
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
+  try {
+    if (cache.get(dedupKey)) return { handled: false, reason: 'duplicate' };
+    cache.put(dedupKey, '1', 120);
+  } finally {
+    lock.releaseLock();
+  }
 
   const menuKey = 'wa_menu_' + hashSha256Hex_(chatId).slice(0, 32);
   const menuActivo = !!cache.get(menuKey);
@@ -1336,12 +1382,7 @@ function procesarWebhookGreenApi_(body) {
 
 function normalizarItemListaCompras_(it, serverCreatedAt) {
   if (!it || typeof it !== 'object' || Array.isArray(it)) return null;
-  const texto = String(it.texto || '')
-    .replace(/[\r\n\t]+/g, ' ')
-    .trim()
-    .slice(0, 120)
-    .replace(/^[\s=+\-@]+/, '')
-    .trim();
+  const texto = sanitizarDescripcion_(String(it.texto || ''), 120);
   const id = String(it.id || '').trim();
   if (!id || !esIdSeguro_(id) || !texto) return null;
   const rawAutor = String(it.autor || '').trim();
@@ -1376,6 +1417,7 @@ function registrarShoppingBatchId_(batchId) {
     ids.push(batchId);
     const trimmed = ids.slice(-30);
     PropertiesService.getScriptProperties().setProperty('SHOPPING_BATCH_IDS', JSON.stringify(trimmed));
+    invalidarScriptPropsCache_();
   } catch (e) {
     Logger.log('Error guardando SHOPPING_BATCH_IDS: ' + redactarSecretosTexto_(String(e)));
   }
@@ -1667,19 +1709,38 @@ function guardarListaCompras_(payload) {
 // 7. SETUP INICIAL Y GESTIÓN DE SECRETOS (SOLO EDITOR APPS SCRIPT)
 // ============================================================
 
+function notificarSecretoEditor_(titulo, mensajeConSecreto, resumenSinSecreto) {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(titulo, mensajeConSecreto, ui.ButtonSet.OK);
+    Logger.log(resumenSinSecreto);
+    return;
+  } catch (e) {}
+  Logger.log(resumenSinSecreto);
+  Logger.log(mensajeConSecreto);
+}
+
 function generarClaveAcceso() {
   const key = generarTokenSeguro_(32);
   PropertiesService.getScriptProperties().setProperty('APP_ACCESS_KEY', key);
-  Logger.log('APP_ACCESS_KEY generada y guardada en Propiedades del Script.');
-  Logger.log('Copiá esta clave única para cargarla 1 vez en tu teléfono y en el de Virginia: ' + key);
+  invalidarScriptPropsCache_();
+  notificarSecretoEditor_(
+    'Nueva APP_ACCESS_KEY generada',
+    'Copiá esta clave única para cargarla 1 vez en tu teléfono y en el de Virginia:\n\n' + key,
+    'APP_ACCESS_KEY generada y guardada en Propiedades del Script.'
+  );
   return key;
 }
 
 function generarSecretoWebhook() {
   const secret = generarTokenSeguro_(32);
   PropertiesService.getScriptProperties().setProperty('WEBHOOK_SECRET', secret);
-  Logger.log('WEBHOOK_SECRET guardado en Propiedades del Script.');
-  Logger.log('Agregá ?wh=' + secret + ' al final de la URL de webhook en Green API (Brian y Virginia).');
+  invalidarScriptPropsCache_();
+  notificarSecretoEditor_(
+    'Nuevo WEBHOOK_SECRET generado',
+    'Agregá ?wh=' + secret + ' al final de la URL de webhook en Green API (Brian y Virginia).',
+    'WEBHOOK_SECRET guardado en Propiedades del Script.'
+  );
   return secret;
 }
 
@@ -1691,32 +1752,75 @@ function configurarTokenGreenApi(usuario, nuevoToken) {
   const token = String(nuevoToken || '').trim();
   if (!token) throw new Error('El token no puede estar vacío');
   PropertiesService.getScriptProperties().setProperty('greenApiToken_' + user, token);
+  invalidarScriptPropsCache_();
   eliminarClavesConfigSheet_(['greenApiToken_' + user]);
   Logger.log('Token de Green API guardado en ScriptProperties para ' + user + '.');
   return true;
+}
+
+function leerTokensConfigCrudos_() {
+  const tokens = { greenApiToken_Brian: '', greenApiToken_Virginia: '' };
+  const presentes = { greenApiToken_Brian: false, greenApiToken_Virginia: false };
+  const sheet = getSheet_('Config', false);
+  if (!sheet) return { tokens: tokens, presentes: presentes };
+  const values = sheet.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    const k = String(values[i][0] || '').trim();
+    if (Object.prototype.hasOwnProperty.call(tokens, k)) {
+      presentes[k] = true;
+      const v = String(values[i][1] || '').trim();
+      if (v) tokens[k] = v;
+    }
+  }
+  return { tokens: tokens, presentes: presentes };
+}
+
+function migrarSecretosAPropertiesSinLock_() {
+  invalidarCacheSheet_('Config');
+  const rawSheet = leerTokensConfigCrudos_();
+  const props = PropertiesService.getScriptProperties();
+  const migrados = [];
+  const conflictos = [];
+  const clavesBorrar = [];
+
+  ['Brian', 'Virginia'].forEach(user => {
+    const k = 'greenApiToken_' + user;
+    const sheetVal = rawSheet.tokens[k];
+    const existingProp = String(props.getProperty(k) || '').trim();
+
+    if (sheetVal && !existingProp) {
+      props.setProperty(k, sheetVal);
+      invalidarScriptPropsCache_();
+      migrados.push(user);
+    } else if (sheetVal && existingProp && existingProp !== sheetVal) {
+      conflictos.push(user);
+      Logger.log('Aviso: ' + k + ' ya existe en ScriptProperties con un valor distinto al de Config; se conserva ScriptProperties.');
+    }
+
+    if (rawSheet.presentes[k]) {
+      const confirmedProp = existingProp || String(props.getProperty(k) || '').trim();
+      if (!sheetVal || confirmedProp) {
+        clavesBorrar.push(k);
+      }
+    }
+  });
+
+  if (clavesBorrar.length) {
+    eliminarClavesConfigSheetSinLock_(clavesBorrar);
+  }
+  Logger.log(
+    'Migración a ScriptProperties completada. Tokens migrados: ' +
+    (migrados.length ? migrados.join(', ') : 'ninguno (ya estaban vacíos/migrados)') +
+    (conflictos.length ? ' | Conflictos conservando ScriptProperties: ' + conflictos.join(', ') : '')
+  );
+  return { migrados: migrados, conflictos: conflictos };
 }
 
 function migrarSecretosAProperties() {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    invalidarCacheSheet_('Config');
-    const cfg = leerConfig_(true);
-    const props = PropertiesService.getScriptProperties();
-    const migrados = [];
-    const clavesBorrar = [];
-    ['Brian', 'Virginia'].forEach(user => {
-      const k = 'greenApiToken_' + user;
-      const val = String((cfg && cfg[k]) || '').trim();
-      if (val) {
-        props.setProperty(k, val);
-        migrados.push(user);
-      }
-      clavesBorrar.push(k);
-    });
-    eliminarClavesConfigSheetSinLock_(clavesBorrar);
-    Logger.log('Migración a ScriptProperties completada. Tokens migrados: ' + (migrados.length ? migrados.join(', ') : 'ninguno (ya estaban vacíos/migrados)'));
-    return { migrados: migrados };
+    return migrarSecretosAPropertiesSinLock_();
   } finally {
     lock.releaseLock();
   }
@@ -1753,7 +1857,6 @@ function eliminarClavesConfigSheetSinLock_(keys) {
 function setupSheets() {
   Object.keys(SHEET_SCHEMAS).forEach(nombre => {
     asegurarCabeceras_(nombre);
-    const schema = SHEET_SCHEMAS[nombre];
     const sheet = getSheet_(nombre, true);
     const filasFmt = Math.min(Math.max(sheet.getMaxRows() - 1, 1), 998);
     aplicarFormatoTextoColumnas_(sheet, nombre, 2, filasFmt);
@@ -1771,9 +1874,72 @@ function setupSheets() {
     greenApiId_Virginia: cfg.greenApiId_Virginia || ''
   });
 
+  migrarSecretosAProperties();
   limpiarConfigLegacy_();
 
   Logger.log('Setup y reparación completa. Pestañas y formatos asegurados: ' + Object.keys(SHEET_SCHEMAS).join(', '));
+}
+
+function verificarEstadoSeguridad() {
+  invalidarScriptPropsCache_();
+  invalidarCacheSheet_('Config');
+  const propsObj = PropertiesService.getScriptProperties().getProperties() || {};
+  const cfg = leerConfig_(true);
+  const rawSheet = leerTokensConfigCrudos_();
+
+  const appKey = String(propsObj.APP_ACCESS_KEY || '').trim();
+  const whSecret = String(propsObj.WEBHOOK_SECRET || '').trim();
+  const groupId = String(cfg.whatsappGroupId || '').trim();
+
+  const whitelistSet = new Set(['https://api.green-api.com/']);
+  const inspeccionarGreenApi = user => {
+    const tokenKey = 'greenApiToken_' + user;
+    const rawUrl = String(cfg['greenApiUrl_' + user] || '').trim().replace(/\/+$/, '');
+    const effectiveUrl = rawUrl || 'https://api.green-api.com';
+    const urlValid = GREEN_API_URL_REGEX_.test(effectiveUrl);
+    if (urlValid) whitelistSet.add(effectiveUrl + '/');
+    const rawId = String(cfg['greenApiId_' + user] || '').trim();
+    const propToken = String(propsObj[tokenKey] || '').trim();
+    const sheetToken = rawSheet.tokens[tokenKey];
+    return {
+      idConfigured: /^\d{4,20}$/.test(rawId),
+      urlOrigin: effectiveUrl,
+      urlValid: urlValid,
+      tokenInScriptProperties: propToken.length > 0,
+      tokenStillInConfigSheet: sheetToken.length > 0
+    };
+  };
+
+  const brianStatus = inspeccionarGreenApi('Brian');
+  const virginiaStatus = inspeccionarGreenApi('Virginia');
+  const chatType = /@g\.us$/.test(groupId)
+    ? 'group'
+    : (/@c\.us$/.test(groupId) ? 'direct' : 'invalid_or_empty');
+
+  const hasAnyTokenInProps = brianStatus.tokenInScriptProperties || virginiaStatus.tokenInScriptProperties;
+  const anyPlaintextTokenInSheet = brianStatus.tokenStillInConfigSheet || virginiaStatus.tokenStillInConfigSheet;
+
+  const reporte = {
+    appAccessKey: { configured: appKey.length >= 16, length: appKey.length },
+    webhookSecret: { configured: whSecret.length >= 16, length: whSecret.length },
+    greenApiBrian: brianStatus,
+    greenApiVirginia: virginiaStatus,
+    whatsappGroup: {
+      validFormat: /^[0-9-]+@(g\.us|c\.us)$/.test(groupId),
+      chatType: chatType
+    },
+    anyPlaintextTokenInSheet: anyPlaintextTokenInSheet,
+    suggestedUrlFetchWhitelist: Array.from(whitelistSet),
+    readyForStage1BFailClosed: (
+      appKey.length >= 16 &&
+      whSecret.length >= 16 &&
+      hasAnyTokenInProps &&
+      !anyPlaintextTokenInSheet
+    )
+  };
+
+  Logger.log(JSON.stringify(reporte, null, 2));
+  return reporte;
 }
 
 function limpiarConfigLegacy_() {

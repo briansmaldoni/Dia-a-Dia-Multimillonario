@@ -7,7 +7,7 @@
   <title>Dia a Dia Multimillonarios</title>
 
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self'; manifest-src 'self';">
 
   <!-- Vinculación PWA Standalone -->
   <link rel="manifest" href="manifest.json">
@@ -24,7 +24,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
     href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,300;0,400;0,500;0,700;0,800;0,900;1,400;1,700&family=Zilla+Slab:wght@700&display=swap"
-    rel="stylesheet">
+    rel="stylesheet" crossorigin="anonymous">
 
   <!-- Script externo anti-parpadeo de sesión y paleta -->
   <script src="theme-boot.js"></script>
@@ -138,7 +138,7 @@
                   AHORROS: <span id="savings-bag-display">$ 0,00</span>
                 </p>
               </div>
-              <button data-action="open-future-days-modal"
+              <button type="button" data-action="open-future-days-modal"
                 class="text-sm font-bold theme-text-muted hover:underline focus:outline-none">
                 Próximos días
               </button>
@@ -150,11 +150,11 @@
 
           <!-- PESTAÑAS DE MOVIMIENTOS -->
           <div class="flex items-center justify-around border-b border-white/20 pb-2 mb-3">
-            <button id="tab-movs-list" data-action="set-micro-subview" data-arg="list"
+            <button id="tab-movs-list" type="button" data-action="set-micro-subview" data-arg="list"
               class="px-3 py-1 text-xs font-black tracking-wider text-white border-b-2 border-white focus:outline-none uppercase text-center">
               GASTOS
             </button>
-            <button id="tab-movs-add" data-action="set-micro-subview" data-arg="add"
+            <button id="tab-movs-add" type="button" data-action="set-micro-subview" data-arg="add"
               class="px-3 py-1 text-xs font-normal tracking-wider text-white/70 hover:text-white focus:outline-none uppercase text-center">
               NUEVO GASTO
             </button>
@@ -418,11 +418,11 @@
           class="w-full py-3.5 rounded-full theme-bg-primary text-white font-bold text-sm tracking-wide shadow hover:opacity-90">
           Actualizar saldo
         </button>
-        <button id="day-change-btn-bag" data-action="resolve-day-change" data-arg="bag"
+        <button id="day-change-btn-bag" type="button" data-action="resolve-day-change" data-arg="bag"
           class="w-full py-3.5 rounded-full border-2 theme-border-primary theme-text-primary font-bold text-sm tracking-wide hover:bg-black/5">
           Guardar en Ahorros
         </button>
-        <button id="day-change-btn-distribute" data-action="resolve-day-change" data-arg="distribute"
+        <button id="day-change-btn-distribute" type="button" data-action="resolve-day-change" data-arg="distribute"
           class="w-full py-3.5 rounded-full border-2 theme-border-primary theme-text-primary font-bold text-sm tracking-wide hover:bg-black/5">
           Repartir en los próximos días
         </button>
@@ -579,10 +579,10 @@
         <p class="text-xs text-zinc-500 leading-relaxed">Necesaria una sola vez en este teléfono para habilitar la sincronización segura con la planilla.</p>
       </div>
       <form id="access-key-form" class="space-y-3" autocomplete="on">
-        <input type="text" name="username" value="multimillonarios" autocomplete="username" class="hidden" tabindex="-1" aria-hidden="true">
+        <input type="text" name="username" value="multimillonarios" autocomplete="username" class="sr-only" tabindex="-1" aria-hidden="true">
         <div>
           <label for="access-key-input" class="sr-only">Clave de acceso</label>
-          <input id="access-key-input" type="password" required autocomplete="current-password"
+          <input id="access-key-input" name="password" type="password" required autocomplete="current-password"
             placeholder="Pegá la clave compartida..."
             class="w-full rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-base text-zinc-900 placeholder-zinc-400 focus:outline-none focus:bg-white focus:border-zinc-400">
         </div>
@@ -592,6 +592,12 @@
           Desbloquear y sincronizar
         </button>
       </form>
+      <div class="pt-1 text-center">
+        <button id="btn-clear-pending-local" type="button"
+          class="text-[11px] font-medium text-zinc-400 hover:text-rose-600 underline transition-colors">
+          Borrar cambios pendientes locales
+        </button>
+      </div>
     </div>
   </div>
 

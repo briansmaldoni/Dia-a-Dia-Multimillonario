@@ -1,4 +1,23 @@
 (function () {
+  var isFramed = false;
+  try {
+    isFramed = window.self !== window.top;
+  } catch (e) {
+    isFramed = true;
+  }
+  try {
+    window.__appFramedBlocked = isFramed;
+  } catch (e) {}
+  if (isFramed) {
+    if (document && document.documentElement && document.documentElement.classList) {
+      document.documentElement.classList.add('framed-blocked');
+    }
+    try {
+      window.top.location = window.self.location.href;
+    } catch (e) {}
+    return;
+  }
+
   var isReload = false;
   try {
     if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('app_skip_splash_once') === '1') {

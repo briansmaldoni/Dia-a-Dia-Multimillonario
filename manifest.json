@@ -3,6 +3,7 @@
   "short_name": "Dia a Dia Multimillonarios",
   "description": "Aplicación de gestión financiera personal y proyección mensual para Brian & Virginia.",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#536460",

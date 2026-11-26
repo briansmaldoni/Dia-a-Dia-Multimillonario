@@ -321,8 +321,9 @@ html.skip-splash #app-splash-screen {
   align-items: flex-end;
   justify-content: center;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.25s ease;
+  transition: opacity 0.25s ease, visibility 0s linear 0.25s;
   z-index: 500;
   overflow: hidden;
   overscroll-behavior-y: contain;
@@ -344,7 +345,9 @@ html.skip-splash #app-splash-screen {
 
 .modal-overlay.active {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
+  transition: opacity 0.25s ease, visibility 0s linear 0s;
 }
 
 .modal-sheet {
@@ -408,6 +411,7 @@ html.skip-splash #app-splash-screen {
 #exit-toast {
   transition: opacity 0.25s ease, transform 0.25s ease;
   transform: translate(-50%, 10px);
+  z-index: 1100;
 }
 
 #exit-toast.active {
@@ -798,4 +802,16 @@ html.skip-splash #app-splash-screen {
 /* ==================== PRIORIDAD ABSOLUTA DE OCULTAMIENTO ==================== */
 .hidden {
   display: none !important;
+}
+
+[inert] {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
+html.framed-blocked,
+html.framed-blocked body {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
